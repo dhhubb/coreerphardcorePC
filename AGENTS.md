@@ -190,6 +190,19 @@ psql "$DATABASE_URL" -f scripts/check-tenant-tables.sql  # must be 0 rows
   read time instead of storing them (ADR-0047).
 * **Money and reads.** All report money is `Decimal` in TS and NUMERIC(19,4) in PG; use
   `moneyFromSql`/`money` at the boundary, never a JS number.
+* **The login path has no user, so it runs as `anon`.** `src/core/login.ts` sets
+  `set local role anon` and calls `SECURITY DEFINER` functions (`app.authenticate`,
+  `app.login_context`); `anon` can read neither `app.user_credentials` nor a tenant row directly, so
+  no service role is needed (ADR-0067). `app.user_credentials` carries no `org_id` (a user may
+  belong to several orgs), so it is deliberately NOT a tenant table and is not registered in
+  `scripts/check-tenant-tables.sql` or `tests/support/tenant-tables.ts` (ADR-0065).
+* **The session key is `token`, not `pos_access_token`.** `src/core/session.ts` owns the read
+  (`getToken()`, which falls back to the legacy key); every client that attaches a bearer token
+  (till, reports, fiscal, import, admin) calls it rather than reading localStorage directly. The
+  e2e specs still seed `pos_access_token` and work through the fallback.
+* **A client page that reads `useSearchParams()` needs a `<Suspense>` boundary**, or
+  `next build` fails with "useSearchParams should be wrapped in a suspense boundary" (`/login`
+  does this).
 
 ## Test numbering
 
