@@ -1334,3 +1334,78 @@ to a fixed-scale string.
 
 **Consequence.** Nothing on the console updates or deletes a Z-report, and the read is a single
 indexed lookup (test 111 closes a shift and reads the report back).
+
+## ADR-0065 — F1 adds `app.user_credentials`, a non-tenant table, without touching the core
+
+**Context.** F1 replaces "paste a token into localStorage" with email/password sign-in. Supabase
+Auth owns `auth.users`, but the local stack runs without the GoTrue email provider wired to a mailer,
+and the brief wants a self-contained `/login` that returns a tenant-scoped access token. Storing a
+password needs a table, and every tenant table in this schema carries `org_id` and RLS.
+
+**Decision.** The F1 migration adds `app.user_credentials (user_id, password_hash, …)` in the `app`
+schema: a bcrypt hash keyed by `auth.users.id`. It is deliberately not a public tenant table. A user
+may belong to several orgs, so it has no `org_id`; it is never reachable through the Data API (it
+lives in `app`, not `public`, and is granted to no role); and only the `SECURITY DEFINER` login
+functions read it. It is therefore not registered in `scripts/check-tenant-tables.sql` or
+`tests/support/tenant-tables.ts`. The migration is additive: no core table or function changes
+(so no ADR-gated edit of a shared table). Two definer functions are added — `app.authenticate(email,
+password)` and `app.upsert_user_credentials(user_id, password)` — plus `app.login_context(user_id)`,
+which returns the same claims the custom access token hook would mint, plus the org name for the
+shell header.
+
+**Consequence.** Sign-in works with no hosted Supabase project and no mailer, and no plaintext
+password ever reaches a table (test 114 asserts the stored value is a bcrypt hash and that no
+`password` column exists). Because the table is not a tenant table, the tenant invariant checks stay
+honest rather than being widened to a table that legitimately has no `org_id`.
+
+## ADR-0066 — F1 owns tests 112–118
+
+**Context.** The F1 brief specifies behaviour (a login page, `/api/auth/me`, an app shell) but
+allocates no test numbers. ADR-0010 fixes the rule: a new run continues from the highest number
+actually present, and the highest present after A3 is 111.
+
+**Decision.** F1 owns tests 112–118 in `tests/frontend-f1.test.ts`. They cover: a correct sign-in
+returns a token scoped to the right org (112); a wrong password and an unknown email fail
+identically (113); passwords are stored only as a hash (114); a malformed body is rejected (115);
+`/api/auth/me` rejects a missing, forged or malformed token (116); the session helpers use the keys
+the brief names (117); a user with no membership gets a valid token with a null org (118).
+
+**Consequence.** The numbering continues without gaps or collisions, and the F1 tests exercise the
+real route handlers, the real SQL and the real token signature — nothing is mocked.
+
+## ADR-0067 — the login path runs as `anon`, never the service role
+
+**Context.** A signed-out caller has no token and no user context. `withUserContext` drops into the
+`authenticated` role, which needs a subject; the login path has none yet. The tempting shortcut is
+the service role key, but the brief forbids it on any application request path.
+
+**Decision.** `login()` opens a transaction, runs `SET LOCAL ROLE anon`, and calls two `SECURITY
+DEFINER` functions. `app.authenticate` compares the bcrypt hash with the definer's privileges and
+returns the `auth.users.id` (or null); `app.login_context` reads the membership and the org name as
+the definer and returns the claims. `anon` itself can read neither `app.user_credentials` nor a
+tenant row, so the login path holds no broad privilege. On success the route signs an HS256 token in
+TypeScript with `SUPABASE_JWT_SECRET` (the same secret the local stack and the custom access token
+hook use), so the token the client stores is a real access token every other route verifies.
+
+**Consequence.** Sign-in needs no service role and no RLS bypass, and a wrong email and a wrong
+password are indistinguishable (both return null, then a 401 with the same body — test 113), so the
+response never reveals which accounts exist.
+
+## ADR-0068 — the app shell gates navigation on the client, not in edge middleware
+
+**Context.** A page must send a signed-out visitor to `/login`. The token lives in `localStorage`,
+which edge middleware cannot read. An initial F1 attempt added `src/middleware.ts` that read a
+mirrored cookie and redirected pages; but the existing Playwright specs seed only
+`localStorage['pos_access_token']` and then navigate, so a cookie-based redirect would break them,
+and the cookie carried no authority the localStorage token did not already carry.
+
+**Decision.** There is no `src/middleware.ts`. The `Shell` component (which wraps every `/pos` and
+`/admin` page) checks `hasSession()` on mount and `router.replace('/login?next=…')` when there is no
+token; `/pos` keeps its own equivalent guard. The `token` key is read first and the legacy
+`pos_access_token` key is read as a fallback, so an existing browser session and the existing e2e
+specs keep working. Authorisation is never a client decision: every API call re-verifies the token
+on the server (`withAuth` / `withUserContext`).
+
+**Consequence.** Signed-out navigation is redirected, the existing token-seeded specs are unaffected,
+and the token is checked where it actually matters — on the server. The cost is a brief client-side
+flash before the redirect, which is acceptable for a shell that already renders from token claims.

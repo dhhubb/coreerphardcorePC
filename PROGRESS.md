@@ -5,7 +5,8 @@ Stack: Next.js 14 (App Router) · TypeScript strict · Supabase (local Postgres 
 Schema: plain SQL migrations in `supabase/migrations/` (no Prisma).
 
 Phase 1 (the core) is complete: tests 1–40. R1 extends the core additively: tests 41–44. R2 adds
-pricing and promotions: tests 45–48.
+pricing and promotions: tests 45–48. F1 adds the frontend shell and email/password sign-in:
+tests 112–118.
 
 ## Status
 
@@ -32,6 +33,7 @@ pricing and promotions: tests 45–48.
 | A1 | Admin products UI: categories, products, variants, barcodes, batches (cloud + branch admin) | tests 96–104 | DONE |
 | A2 | Admin pricing UI: price lists, items, customer groups, promotions, live preview | tests 105–107 | DONE |
 | A3 | Admin operations UI: laybys, returns, shifts & Z-reports, stocktake | tests 108–111 | DONE |
+| F1 | Frontend shell + sign-in: email/password auth, `/api/auth/me`, app shell | tests 112–118 | DONE |
 
 ## M0 — Setup
 
@@ -1514,3 +1516,98 @@ saved to docs/perf/trial-balance-2026-11-16T15-14-26-876Z.md
   (ADR-0062).
 * No test is mocked: the A3 tests run against the real local Postgres and call the route handlers
   with a real access token, so RLS is genuinely exercised.
+
+## F1 — Frontend shell + sign-in (email/password auth, app shell)
+
+Additive on top of A3. No core table or function changes; the F1 migration adds one non-tenant table
+and three functions (ADR-0065). Tests **112–118** in `tests/frontend-f1.test.ts` (ADR-0066).
+
+### What was built
+
+* **Migration** `supabase/migrations/20260101160000_frontend_f1_auth.sql`:
+  `app.user_credentials` (bcrypt hash keyed by `auth.users.id`, no `org_id`, not exposed through the
+  Data API), `app.authenticate(email, password)`, `app.login_context(user_id)` and
+  `app.upsert_user_credentials(id, password)`. All `SECURITY DEFINER`.
+* **Core** `src/core/login.ts` — `login(email, password)`: verifies the password in Postgres and
+  returns a signed token with the tenant claims. Runs as `anon`, never the service role (ADR-0067).
+  `src/core/auth.ts` — `mintAccessToken` (HS256, the same shape the custom access token hook mints)
+  and `org_name` carried in the claims.
+* **Session** `src/core/session.ts` — keys `token` and `org_id` (the brief's keys), with
+  `getToken`/`getOrgId`/`setSession`/`clearSession`/`currentClaims`/`hasSession`. The legacy
+  `pos_access_token` key is still read as a fallback.
+* **Routes** `POST /api/auth/login`, `GET /api/auth/me` (validates the token and describes the
+  session).
+* **Shell** `src/app/shell/Shell.tsx` — sidebar nav, org name, signed-in user, sign-out; wraps every
+  `/pos` and `/admin` page via `src/app/pos/layout.tsx` and `src/app/admin/layout.tsx`. Gates
+  navigation on the client (no edge middleware — ADR-0068).
+* **Pages** `/login` (email + password form; stores `token` and `org_id`, then redirects to `/pos`).
+* **Seed** `scripts/seed-demo.ts` — a demo tenant: admin user `admin@demo.com` / `admin123`, a
+  branch, a till, ten products with barcodes and stock.
+
+### The seven tests
+
+| # | Test |
+| --- | --- |
+| 112 | A correct email and password returns a token that scopes the right org |
+| 113 | A wrong password and an unknown email both fail with the same 401 |
+| 114 | Passwords are stored only as a bcrypt hash, never in plaintext |
+| 115 | A missing or malformed body is rejected before any password check |
+| 116 | `/api/auth/me` rejects a missing, malformed or forged token |
+| 117 | The session helpers store and read the token and org id under the documented keys |
+| 118 | A user with no membership signs in but gets a token with no org |
+
+Test numbers continue from A3 (ADR-0010, ADR-0066).
+
+### Gate
+
+```
+$ supabase db reset
+Finished supabase db reset on branch master.   (all migrations apply to an empty DB)
+
+$ npm test
+ Test Files  24 passed (24)
+      Tests  179 passed (179)
+
+$ npm run build
+✓ Compiled successfully   (incl. /login, /api/auth/login, /api/auth/me)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+
+$ npm run test:perf
+saved to docs/perf/trial-balance-2026-11-16T23-24-54-191Z.md
+
+$ npm run test:e2e
+5 passed (31.8s)   (incl. A3 console navigation — the F1 sidebar does not shadow a page link)
+```
+
+Manual smoke test (dev server, after `npm run db:seed-demo`):
+
+```
+POST /api/auth/login  {admin@demo.com, admin123} → 200, token + org_id + branch_ids
+POST /api/auth/login  {admin@demo.com, wrong}    → 401 {"error":"invalid email or password"}
+GET  /api/auth/me     (no token)                 → 401 {"error":"unauthorized"}
+GET  /api/auth/me     (valid token)              → 200, user/org_id/org_name/branch_ids
+GET  /login                                      → 200, renders the sign-in form
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065); the tenant invariant checks still
+  return zero rows.
+* **No service role on the login path.** It runs as `anon` and calls `SECURITY DEFINER` functions
+  (ADR-0067).
+* **RLS is never bypassed for a read.** `/api/auth/me` runs through `withAuth`/`withUserContext` as
+  the caller; a token minted before `org_name` was added still resolves the name from the caller's
+  own `organizations` row.
+* **Navigation is gated on the client.** The token lives in localStorage, which edge middleware
+  cannot read; the shell redirects to `/login` and every API call re-verifies the token (ADR-0068).
+  The existing token-seeded e2e specs are unaffected.
+* **No test is mocked.** The F1 tests call the real route handlers, the real SQL and a real HS256
+  signature, against the local Postgres.

@@ -1,5 +1,6 @@
 'use client';
 
+import { getToken } from '@/core/session';
 import { useCallback, useEffect, useState } from 'react';
 
 /**
@@ -27,7 +28,7 @@ interface QueuePayload {
 }
 
 function authHeaders(): HeadersInit {
-  const token = typeof window !== 'undefined' ? window.localStorage.getItem('pos_access_token') : null;
+  const token = getToken();
   return {
     accept: 'application/json',
     'content-type': 'application/json',

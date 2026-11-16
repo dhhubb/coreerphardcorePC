@@ -2,7 +2,9 @@
 
 import Decimal from 'decimal.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiFetch, apiJson } from '@/verticals/pos/api';
+import { useRouter } from 'next/navigation';
+import { apiFetch, apiJson, posToken } from '@/verticals/pos/api';
+import { currentClaims, type SessionClaims } from '@/core/session';
 import { enqueueSale, countPending, type OutboxSale } from '@/verticals/pos/outbox';
 import { syncOnce } from '@/verticals/pos/sync';
 import { RegisterServiceWorker } from '@/branch/RegisterServiceWorker';
@@ -55,6 +57,7 @@ function displayMoney(value: Decimal): string {
 }
 
 export default function PosPage() {
+  const router = useRouter();
   const {
     lines,
     tenders,
@@ -92,6 +95,16 @@ export default function PosPage() {
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [shopName] = useState(defaultShop().name);
+  const [claims, setClaims] = useState<SessionClaims | null>(null);
+
+  // The till is a signed-in surface: without a session, send the operator to the sign-in page.
+  useEffect(() => {
+    if (!posToken()) {
+      router.replace('/login?next=%2Fpos');
+      return;
+    }
+    setClaims(currentClaims());
+  }, [router]);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -550,6 +563,12 @@ export default function PosPage() {
 
       <section className="left">
         <h1>POS</h1>
+        <SessionBar
+          claims={claims}
+          tillId={tillId}
+          branchId={claims?.branchIds[0] ?? null}
+          health={health}
+        />
         <CloudBadge health={health} />
         <p className="hint" data-testid="shortcut-hint">
           {shortcutHint()} · Enter confirm &amp; print
@@ -761,6 +780,47 @@ function toReceipt(payload: RawSaleResponse): PosReceipt {
 }
 
 /**
+ * The signed-in operator's strip: who is on the till, the branch, the till id, and a live
+ * online/offline badge. The badge follows the branch health poll, not `navigator.onLine`, so it
+ * shows the truth on a shop LAN whose internet is down.
+ */
+function SessionBar({
+  claims,
+  tillId,
+  branchId,
+  health,
+}: {
+  claims: SessionClaims | null;
+  tillId: string;
+  branchId: string | null;
+  health: BranchHealthState;
+}) {
+  const online = health.branchReachable && health.cloudStatus === 'online';
+  const label = !health.branchReachable
+    ? 'Offline'
+    : health.cloudStatus === 'online'
+      ? 'Online'
+      : health.cloudStatus === 'incompatible'
+        ? 'Incompatible'
+        : 'Offline';
+
+  return (
+    <div className="session" data-testid="session-bar">
+      <span data-testid="cashier">{claims?.email ?? 'not signed in'}</span>
+      <span data-testid="branch">branch {branchId ? branchId.slice(0, 8) : '—'}</span>
+      <span data-testid="till">till {tillId}</span>
+      <span
+        className={online ? 'badge badge-up' : 'badge badge-off'}
+        data-testid="connection-status"
+        data-status={online ? 'online' : 'offline'}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+/**
  * The branch/cloud status badge. Shown always, because a cashier must know whether the cloud is
  * reachable before they need it.
  */
@@ -806,6 +866,9 @@ const POS_STYLES = `
   .left { min-width: 0; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .hint { color: #555; font-size: 12px; margin: 0 0 10px; }
+  .session { display: flex; gap: 12px; align-items: center; font-size: 12px; color: #444;
+             margin: 0 0 8px; flex-wrap: wrap; }
+  .session .badge { margin: 0; }
   .scan-label { display: block; font-size: 12px; color: #555; }
   .scan { width: 100%; font-size: 18px; padding: 8px; }
   .camera { margin: 8px 0; display: flex; gap: 8px; align-items: center; }

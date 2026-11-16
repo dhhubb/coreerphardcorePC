@@ -6,11 +6,17 @@
  * session); apiFetch attaches it and never uses the service role key.
  */
 
+import { getToken } from '@/core/session';
+
 export const POS_TOKEN_KEY = 'pos_access_token';
 
+/**
+ * The bearer token for a request. Since F1 the signed-in session lives under `token` (see
+ * `src/core/session.ts`); `pos_access_token` is kept as a fallback so an older tab, or a test that
+ * seeds a token directly, still works. Reads prefer the session key.
+ */
 export function posToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return window.localStorage.getItem(POS_TOKEN_KEY);
+  return getToken();
 }
 
 export function setPosToken(token: string): void {

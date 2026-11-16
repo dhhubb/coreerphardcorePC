@@ -7,6 +7,8 @@ export interface AuthClaims {
   sub: string;
   /** Organisation the token is scoped to, or null when the user has no membership. */
   orgId: string | null;
+  /** Organisation display name, carried for the shell header. Absent when unknown. */
+  orgName?: string | null;
   /** Branches the token is scoped to. */
   branchIds: string[];
   role: string;
@@ -18,6 +20,7 @@ interface RawJwtPayload {
   role?: unknown;
   email?: unknown;
   org_id?: unknown;
+  org_name?: unknown;
   branch_ids?: unknown;
   exp?: unknown;
 }
@@ -67,6 +70,9 @@ export function verifyAccessToken(token: string): AuthClaims {
   return {
     sub: decoded.sub,
     orgId: typeof decoded.org_id === 'string' && decoded.org_id !== '' ? decoded.org_id : null,
+    ...(typeof decoded.org_name === 'string' && decoded.org_name !== ''
+      ? { orgName: decoded.org_name }
+      : {}),
     branchIds,
     role: typeof decoded.role === 'string' ? decoded.role : 'authenticated',
     ...(typeof decoded.email === 'string' ? { email: decoded.email } : {}),
@@ -86,6 +92,7 @@ export function claimsToRequestSetting(claims: AuthClaims): string {
     sub: claims.sub,
     role: claims.role,
     ...(claims.email !== undefined ? { email: claims.email } : {}),
+    ...(claims.orgName !== undefined && claims.orgName !== null ? { org_name: claims.orgName } : {}),
     org_id: claims.orgId,
     branch_ids: claims.branchIds,
   });
@@ -124,4 +131,44 @@ export async function withUserContext<T>(
   } finally {
     client.release();
   }
+}
+
+function base64Url(input: Buffer | string): string {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+/**
+ * Mint an HS256 access token carrying the tenant claims, in the exact shape the Supabase custom
+ * access token hook produces. The login route uses this so a token from `/api/auth/login` is
+ * indistinguishable to every RLS policy from one Supabase Auth issued.
+ */
+export function mintAccessToken(
+  claims: {
+    sub: string;
+    orgId: string | null;
+    branchIds: string[];
+    orgName?: string | null;
+    email?: string;
+    role?: string;
+  },
+  ttlSeconds = 12 * 3600,
+): string {
+  const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const payload = base64Url(
+    JSON.stringify({
+      sub: claims.sub,
+      role: claims.role ?? 'authenticated',
+      ...(claims.email !== undefined ? { email: claims.email } : {}),
+      ...(claims.orgName !== undefined && claims.orgName !== null ? { org_name: claims.orgName } : {}),
+      org_id: claims.orgId,
+      branch_ids: claims.branchIds,
+      exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+    }),
+  );
+  const signature = createHmac('sha256', jwtSecret()).update(`${header}.${payload}`).digest();
+  return `${header}.${payload}.${base64Url(signature)}`;
 }

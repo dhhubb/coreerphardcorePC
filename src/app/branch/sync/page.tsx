@@ -1,5 +1,6 @@
 'use client';
 
+import { getToken } from '@/core/session';
 import { useCallback, useEffect, useState } from 'react';
 
 /**
@@ -40,7 +41,7 @@ export default function BranchSyncPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const token = window.localStorage.getItem('pos_access_token');
+    const token = getToken();
     try {
       const response = await fetch('/api/branch/sync/status', {
         headers: {

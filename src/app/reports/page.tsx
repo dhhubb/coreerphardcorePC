@@ -1,5 +1,6 @@
 'use client';
 
+import { getToken } from '@/core/session';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 /**
@@ -54,8 +55,7 @@ interface LastSync {
 type Tab = 'profit' | 'best' | 'slow' | 'vat' | 'z';
 
 function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== 'undefined' ? window.localStorage.getItem('pos_access_token') : null;
+  const token = getToken();
   return {
     accept: 'application/json',
     ...(token ? { authorization: `Bearer ${token}` } : {}),

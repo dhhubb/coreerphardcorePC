@@ -53,7 +53,11 @@ export function toErrorResponse(error: unknown): NextResponse {
     return jsonError(error.status, error.message);
   }
   const message = (error as Error).message ?? 'internal error';
-  if (/missing bearer token|invalid access token|expired/.test(message)) {
+  if (
+    /missing bearer token|invalid access token|malformed access token|expired|has no subject/.test(
+      message,
+    )
+  ) {
     return jsonError(401, 'unauthorized');
   }
   // A SQL guard raised an exception (e.g. insufficient stock, limit out of range).

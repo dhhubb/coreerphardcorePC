@@ -1,5 +1,6 @@
 'use client';
 
+import { getToken } from '@/core/session';
 import type { PageCursor } from '@/core/sales';
 
 /**
@@ -18,8 +19,7 @@ export class AdminApiError extends Error {
 }
 
 function authHeaders(): HeadersInit {
-  const token =
-    typeof window !== 'undefined' ? window.localStorage.getItem('pos_access_token') : null;
+  const token = getToken();
   return {
     accept: 'application/json',
     'content-type': 'application/json',

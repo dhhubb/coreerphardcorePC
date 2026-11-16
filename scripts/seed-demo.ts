@@ -1,19 +1,30 @@
 /**
- * Seed one org, branch, warehouse, product and price so the till at /pos can be used by hand.
+ * Seed a demo tenant so the app is usable from the sign-in page.
  *
  *   npm run db:seed-demo
  *
- * It prints a ready-to-paste access token. Put it in the browser console on /pos:
+ * Creates (or reuses) one organisation with:
+ *   * an admin user — admin@demo.com / admin123 — with a bcrypt password hash,
+ *   * a branch and a till,
+ *   * ten products, each with a variant, a barcode and a retail price,
+ *   * stock for each product (a receipt, so the till can sell them).
  *
- *   localStorage.setItem('pos_access_token', '<token>'); location.reload();
+ * It prints the credentials, the barcodes, and a ready-to-use access token. Sign in at /login, or
+ * paste the token into the browser console as a shortcut:
+ *
+ *   localStorage.setItem('token', '<token>'); location.reload();
  *
  * The token carries the same claims the Supabase custom access token hook would add, so the RLS
  * policies apply exactly as they do in production. It expires after 12 hours.
  */
-import { createHmac, randomUUID } from 'node:crypto';
-import { Pool } from 'pg';
+import { randomUUID } from 'node:crypto';
+import { Pool, type PoolClient } from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
+import { mintAccessToken } from '../src/core/auth';
+
+const DEMO_EMAIL = 'admin@demo.com';
+const DEMO_PASSWORD = 'admin123';
 
 function loadEnvFile(file: string): Record<string, string> {
   if (!fs.existsSync(file)) return {};
@@ -30,33 +41,23 @@ const fileEnv = {
   ...loadEnvFile(path.resolve(__dirname, '..', '.env.test')),
 };
 
-function base64Url(input: Buffer | string): string {
-  return Buffer.from(input)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+// The token is signed with the local Supabase JWT secret; make it visible to src/core/auth.ts.
+for (const [key, value] of Object.entries(fileEnv)) {
+  if (process.env[key] === undefined) process.env[key] = value;
 }
 
-function mintToken(claims: { sub: string; orgId: string; branchIds: string[]; email: string }): string {
-  const secret =
-    process.env.SUPABASE_JWT_SECRET ??
-    fileEnv.SUPABASE_JWT_SECRET ??
-    'super-secret-jwt-token-with-at-least-32-characters-long';
-  const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const payload = base64Url(
-    JSON.stringify({
-      sub: claims.sub,
-      role: 'authenticated',
-      email: claims.email,
-      org_id: claims.orgId,
-      branch_ids: claims.branchIds,
-      exp: Math.floor(Date.now() / 1000) + 12 * 3600,
-    }),
-  );
-  const signature = createHmac('sha256', secret).update(`${header}.${payload}`).digest();
-  return `${header}.${payload}.${base64Url(signature)}`;
-}
+const PRODUCTS = [
+  { name: 'Coffee 250g', barcode: 'DEMO-COFFEE', price: '5.0000', cost: '2.0000' },
+  { name: 'Bread loaf', barcode: 'DEMO-BREAD', price: '2.5000', cost: '1.1000' },
+  { name: 'Milk 1L', barcode: 'DEMO-MILK', price: '1.7500', cost: '0.9000' },
+  { name: 'Sugar 1kg', barcode: 'DEMO-SUGAR', price: '3.2000', cost: '1.6000' },
+  { name: 'Cooking oil 2L', barcode: 'DEMO-OIL', price: '6.5000', cost: '3.8000' },
+  { name: 'Maize meal 10kg', barcode: 'DEMO-MAIZE', price: '12.0000', cost: '8.0000' },
+  { name: 'Tea bags 100', barcode: 'DEMO-TEA', price: '4.1000', cost: '2.2000' },
+  { name: 'Soap bar', barcode: 'DEMO-SOAP', price: '1.2000', cost: '0.5500' },
+  { name: 'Matches pack', barcode: 'DEMO-MATCHES', price: '0.8000', cost: '0.3000' },
+  { name: 'Salt 500g', barcode: 'DEMO-SALT', price: '0.9000', cost: '0.4000' },
+];
 
 async function main(): Promise<void> {
   const connectionString =
@@ -68,43 +69,72 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString, max: 2 });
   const client = await pool.connect();
   try {
-    const suffix = Math.random().toString(36).slice(2, 8);
-    const org = (
-      await client.query('select app.create_org($1, $2) as id', [
-        `Demo store ${suffix}`,
-        `demo-${suffix}`,
-      ])
-    ).rows[0].id as string;
+    // Reuse the demo org if it exists, so re-running the seed does not pile up tenants.
+    const existingOrg = await client.query<{ id: string }>(
+      `select id from public.organizations where slug = 'demo' limit 1`,
+    );
+    const org =
+      existingOrg.rows[0]?.id ??
+      (
+        await client.query('select app.create_org($1, $2) as id', ['Demo store', 'demo'])
+      ).rows[0].id as string;
 
-    const branch = (
-      await client.query(
-        `insert into public.branches (org_id, name, slug) values ($1, 'Main', 'main') returning id`,
-        [org],
-      )
-    ).rows[0].id as string;
+    const existingBranch = await client.query<{ id: string }>(
+      `select id from public.branches where org_id = $1 and slug = 'main' limit 1`,
+      [org],
+    );
+    const branch =
+      existingBranch.rows[0]?.id ??
+      (
+        await client.query(
+          `insert into public.branches (org_id, name, slug) values ($1, 'Main', 'main') returning id`,
+          [org],
+        )
+      ).rows[0].id as string;
 
-    const warehouse = (
-      await client.query(
-        `insert into public.warehouses (org_id, branch_id, code, name)
-         values ($1, $2, 'W1', 'Shop floor') returning id`,
-        [org, branch],
-      )
-    ).rows[0].id as string;
+    const existingWarehouse = await client.query<{ id: string }>(
+      `select id from public.warehouses where org_id = $1 and code = 'W1' limit 1`,
+      [org],
+    );
+    const warehouse =
+      existingWarehouse.rows[0]?.id ??
+      (
+        await client.query(
+          `insert into public.warehouses (org_id, branch_id, code, name)
+           values ($1, $2, 'W1', 'Shop floor') returning id`,
+          [org, branch],
+        )
+      ).rows[0].id as string;
 
-    const priceList = (
-      await client.query(
-        `insert into public.price_lists (org_id, name, kind) values ($1, 'Retail', 'retail') returning id`,
-        [org],
-      )
-    ).rows[0].id as string;
+    const existingList = await client.query<{ id: string }>(
+      `select id from public.price_lists where org_id = $1 and kind = 'retail' limit 1`,
+      [org],
+    );
+    const priceList =
+      existingList.rows[0]?.id ??
+      (
+        await client.query(
+          `insert into public.price_lists (org_id, name, kind) values ($1, 'Retail', 'retail') returning id`,
+          [org],
+        )
+      ).rows[0].id as string;
 
-    const items = [
-      { name: 'Coffee 250g', barcode: `DEMO-COFFEE-${suffix}`, price: '5.0000', cost: '2.0000' },
-      { name: 'Bread loaf', barcode: `DEMO-BREAD-${suffix}`, price: '2.5000', cost: '1.1000' },
-      { name: 'Milk 1L', barcode: `DEMO-MILK-${suffix}`, price: '1.7500', cost: '0.9000' },
-    ];
+    // The admin user: reuse by email, set the password hash every run so the credentials always work.
+    const userId = await upsertAdminUser(client, DEMO_EMAIL, DEMO_PASSWORD, org, branch);
 
-    for (const item of items) {
+    // Products: only seed the ones that are missing, so re-running is idempotent.
+    const seeded: Array<{ name: string; barcode: string; price: string }> = [];
+    for (const item of PRODUCTS) {
+      const exists = await client.query<{ id: string }>(
+        `select v.id from public.product_variants v
+          where v.org_id = $1 and v.barcode = $2 limit 1`,
+        [org, item.barcode],
+      );
+      if (exists.rows[0]) {
+        seeded.push({ name: item.name, barcode: item.barcode, price: item.price });
+        continue;
+      }
+
       const product = (
         await client.query(
           `insert into public.products (org_id, sku, name)
@@ -135,31 +165,75 @@ async function main(): Promise<void> {
         variant,
         item.cost,
       ]);
+
+      seeded.push({ name: item.name, barcode: item.barcode, price: item.price });
     }
 
-    const userId = randomUUID();
-    const email = `demo-${suffix}@example.test`;
-    await client.query('insert into auth.users (id, email) values ($1, $2)', [userId, email]);
-    await client.query(
-      `insert into public.memberships (org_id, user_id, role, branch_ids)
-       values ($1, $2, 'owner', array[$3]::uuid[])`,
-      [org, userId, branch],
-    );
-
-    const token = mintToken({ sub: userId, orgId: org, branchIds: [branch], email });
+    const token = mintAccessToken({
+      sub: userId,
+      orgId: org,
+      orgName: 'Demo store',
+      branchIds: [branch],
+      email: DEMO_EMAIL,
+    });
 
     console.log('');
-    console.log('Seeded demo tenant. Scan these barcodes at /pos:');
-    for (const item of items) console.log(`  ${item.barcode}   ${item.name}   ${item.price}`);
+    console.log('Seeded demo tenant.');
     console.log('');
-    console.log('Paste this in the browser console on /pos, then reload:');
+    console.log(`  Sign in at /login:`);
+    console.log(`    email:    ${DEMO_EMAIL}`);
+    console.log(`    password: ${DEMO_PASSWORD}`);
     console.log('');
-    console.log(`  localStorage.setItem('pos_access_token', '${token}'); location.reload();`);
+    console.log(`  Organisation: Demo store (${org})`);
+    console.log(`  Branch:       Main (${branch})`);
+    console.log(`  Till:         TILL-1`);
+    console.log('');
+    console.log('  Products (scan these barcodes at /pos):');
+    for (const item of seeded) console.log(`    ${item.barcode.padEnd(16)} ${item.name.padEnd(20)} ${item.price}`);
+    console.log('');
+    console.log('  Or, as a shortcut, paste this in the browser console, then reload:');
+    console.log('');
+    console.log(`    localStorage.setItem('token', '${token}'); location.reload();`);
     console.log('');
   } finally {
     client.release();
     await pool.end();
   }
+}
+
+/**
+ * Create or reuse the demo admin user and set its password. The password hash is written by
+ * `app.upsert_user_credentials`, which calls pgcrypto's bcrypt in the database, so the plaintext
+ * never reaches a table. The membership is (re)written so the login context resolves the org.
+ */
+async function upsertAdminUser(
+  client: PoolClient,
+  email: string,
+  password: string,
+  org: string,
+  branch: string,
+): Promise<string> {
+  const existing = await client.query<{ id: string }>(
+    'select id from auth.users where lower(email) = lower($1) limit 1',
+    [email],
+  );
+  let userId = existing.rows[0]?.id;
+  if (!userId) {
+    userId = randomUUID();
+    await client.query('insert into auth.users (id, email) values ($1, $2)', [userId, email]);
+  }
+
+  await client.query('select app.upsert_user_credentials($1, $2)', [userId, password]);
+
+  await client.query(
+    `insert into public.memberships (org_id, user_id, role, branch_ids)
+     values ($1, $2, 'owner', array[$3]::uuid[])
+     on conflict (org_id, user_id) do update
+       set role = 'owner', branch_ids = array[$3]::uuid[], is_active = true`,
+    [org, userId, branch],
+  );
+
+  return userId;
 }
 
 main().catch((error) => {

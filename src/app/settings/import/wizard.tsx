@@ -1,5 +1,6 @@
 'use client';
 
+import { getToken } from '@/core/session';
 import { useCallback, useMemo, useState } from 'react';
 import Papa from 'papaparse';
 import {
@@ -30,7 +31,7 @@ interface StagedRow {
 }
 
 function authHeaders(): HeadersInit {
-  const token = typeof window !== 'undefined' ? window.localStorage.getItem('pos_access_token') : null;
+  const token = getToken();
   return {
     accept: 'application/json',
     'content-type': 'application/json',

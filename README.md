@@ -31,6 +31,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [Retail extension (R6)](#retail-extension-r6)
 - [Branch server (H1)](#branch-server-h1)
 - [Offline sync engine (H2)](#offline-sync-engine-h2)
+- [The frontend shell and sign-in (F1)](#the-frontend-shell-and-sign-in-f1)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -980,6 +981,32 @@ set-based insert rather than COPY, which RLS forbids (ADR-0063).
 (`src/verticals/admin/outbox.ts`) and replayed with a capped backoff, like a till sale but in its own
 store (ADR-0052).
 
+## The frontend shell and sign-in (F1)
+
+The app is served behind a small shell rather than a bare page that expects a token pasted into the
+console.
+
+**Sign in.** `/login` posts an email and password to `POST /api/auth/login`. The password is checked
+in Postgres against a bcrypt hash (`app.authenticate`, a `SECURITY DEFINER` function), and the route
+returns a signed access token plus the org it scopes. The login page stores the token under
+`localStorage['token']` and the org id under `localStorage['org_id']`, then redirects to `/pos`.
+The login path runs as `anon` (ADR-0067), never the service role, and a wrong email and a wrong
+password return the same 401 body.
+
+**Validate.** `GET /api/auth/me` re-verifies the bearer token and describes the session (user,
+`org_id`, `org_name`, `branch_ids`, role). It is the endpoint the shell uses to confirm a stored
+token is still good.
+
+**Shell.** `src/app/shell/Shell.tsx` wraps every `/pos` and `/admin` page (via their route
+layouts). It shows the org name and the signed-in user, a sidebar of links, and a sign-out button
+that clears the session and returns to `/login`. When there is no token it redirects to
+`/login?next=…`; the token is read first from `token` and then from the legacy `pos_access_token`
+key, so an existing session keeps working (ADR-0068). Authorisation is never decided on the client:
+every API call re-verifies the token on the server.
+
+**Demo data.** `npm run db:seed-demo` creates a demo org, an admin user (`admin@demo.com` /
+`admin123`), a branch, a till and ten products with barcodes, and prints the credentials.
+
 ## Adding a vertical module
 
 A vertical (Retail, Pharmacy, Hardware, School) sits on top of the core. It never edits a core
@@ -1047,6 +1074,10 @@ scan. Output is written to `docs/perf/`. The run records timings and does not fa
 | 69–74 | H4: hardware and receipts (printer, ESC/POS, relay) | `tests/hardware-h4*.test.ts` |
 | 75–85 | H5: migration wizard (products, customers, opening stock) | `tests/import-h5.test.ts` |
 | 86–95 | H6: reports and the owner console (profit, VAT, Z-reports) | `tests/reports-h6.test.ts` |
+| 96–104 | A1: admin products UI (categories, products, variants, barcodes, batches) | `tests/admin-a1.test.ts` |
+| 105–107 | A2: admin pricing UI (price lists, items, customer groups, promotions, preview) | `tests/admin-a2.test.ts` |
+| 108–111 | A3: admin operations UI (laybys, returns, shifts & Z-reports, stocktake) | `tests/admin-a3.test.ts` |
+| 112–118 | F1: frontend shell and sign-in (email/password, `/api/auth/me`, app shell) | `tests/frontend-f1.test.ts` |
 
 H1's tests are numbered 49–51 because R4 already owns 14–18 and R5 owns 19–24; the H1 brief called
 them 16–18. H2 continues from 52 (ADR-0033) and H3 from 63 (ADR-0038). ADR-0026, ADR-0033 and

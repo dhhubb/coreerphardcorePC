@@ -205,6 +205,7 @@ ADR-0041). H5 owns 75–85 (`tests/import-h5.test.ts`, ADR-0042). H6 owns 86–9
 (`tests/admin-a1.test.ts`, ADR-0050). A2 (admin pricing UI) owns 105–107
 (`tests/admin-a2.test.ts`, ADR-0054; the A2 brief called them 29–31, but those are taken by
 inventory). A3 (admin operations UI) owns 108–111 (`tests/admin-a3.test.ts`, ADR-0059; the A3 brief
-called them 32–35, but those are taken by Phase 1 sales). A new
+called them 32–35, but those are taken by Phase 1 sales). F1 (frontend shell + sign-in) owns 112–118
+(`tests/frontend-f1.test.ts`, ADR-0066). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).
