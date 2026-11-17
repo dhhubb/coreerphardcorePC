@@ -1886,3 +1886,88 @@ F4 spec: 1 passed; the existing branch/pos specs (52, 14) still pass
   run started `redis:7-alpine` on 6379 so the full suite (including those pre-existing tests) is
   green. Without Redis those 12 tests fail with `ECONNREFUSED 127.0.0.1:6379` — an environment gap,
   not a code change.
+
+## F5 — Sync engine (H2) completion
+
+F5 is a completion slice over the sync engine H2 already shipped. H2 built the branch outbox, the
+idempotent cloud ingest, the master-data pull, the retry/conflict policy, the status read and the
+encrypted backup, with tests 53–63. F5 fills the named gaps H2 left, and it is additive: no core
+table or core function changed, no applied migration edited (ADR-0065, ADR-0072).
+
+### What was built
+
+* **A non-blocking cloud dispatcher** (`supabase/migrations/20260101180000_sync_f5.sql`,
+  `app.sync_push_result`): applies every event it can in its own subtransaction, records each
+  rejection, and returns `highest_seq` as the highest sequence it PROCESSED (applied, duplicated or
+  rejected). H2 returned early on the first rejection, so a bad event stopped the rest of the batch
+  and was never acked (the branch re-pushed it forever). Now a rejection is resolved (the conflict is
+  the durable record) and the outbox drains.
+* **Conflicts carry both versions.** `sync_conflicts.both_versions` = `{ local, cloud }`;
+  `app.sync_record_conflict` gained the 8th argument; `app.sync_requeue_conflict(org_id, conflict_id)`
+  re-queues the local event under a fresh id, so "Retry failed" works without un-acking the original.
+* **Two new outbox facts.** A trigger on `z_reports` emits `z_report`; a trigger on `fiscal_invoices`
+  emits `fiscal_result` at `sent`/`failed`. The event-type check also carries the brief's `journal`
+  and `stock_move` spellings. Both triggers are branch-only.
+* **The price version a sale charged.** New branch table `pos_sale_price_versions` (immutable, RLS,
+  the standard indexes), written by a deferred constraint trigger on `pos_sales`: one row per invoice
+  line with the `branch_master_data` price version at sale time.
+* **Backups reported and shown.** `POST /api/backup` records a run (key, byte size, ciphertext
+  checksum); a trigger keeps `sync_state.last_backup_at` current; `GET /api/backup` lists runs.
+* **The sync console.** `/admin/sync` reads `GET /api/branch/sync/status` (the branch's own database,
+  so it answers with the cloud offline) and shows `pending_count`, the last push/pull, the last
+  backup, the cloud protocol version, a protocol banner when push is blocked, and the conflicts with
+  both versions plus a Retry button (`POST /api/sync/conflicts`). `app.sync_status` gained
+  `pending_count` and `last_backup_at` while keeping every H2 key.
+* **Master-data vocabulary.** The `master_data_changes` and `branch_master_data` entity-type checks
+  now also accept `customer` and `user` (no trigger records them here, so no `change_seq` moves).
+
+### The F5 tests (`tests/sync-f5.test.ts`)
+
+| # | Test |
+| --- | --- |
+| 131 | A rejected event does not block the rest of the batch, and the outbox still drains |
+| 132 | A conflict records both versions, and retry re-queues the local event for another push |
+| 133 | Closing a shift emits a `z_report` event and an FDMS outcome emits a `fiscal_result` event |
+| 134 | A sale line keeps the price version it charged, so a later pull cannot rewrite it |
+| 135 | `POST /api/backup` records the run and updates the branch last-backup time |
+
+The brief's own test numbers collide with the tenancy tests (1–14). ADR-0010 forbids renumbering: a
+new run continues from the highest number actually present, which after F4 is 130. See ADR-0072. The
+console behaviour is also driven end to end by `e2e/sync-f5.e2e.ts` (unnumbered, the F4 style): a
+branch-mode dev server seeds a conflict, signs in with a PIN and walks `/admin/sync`.
+
+### Gate
+
+```
+$ npx supabase db reset
+Finished supabase db reset on branch master.   (all migrations apply to an empty DB, incl. 20260101180000)
+
+$ npm test
+ Test Files  28 passed (28)
+      Tests  199 passed (199)
+
+$ npm run build
+✓ Compiled successfully   (incl. the new /admin/sync page and /api/backup route)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+
+$ npx playwright test e2e/sync-f5.e2e.ts
+1 passed
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065, ADR-0072); the tenant invariant checks
+  still return zero rows.
+* **No test is mocked.** The F5 tests call the real SQL functions and TS wrappers against the real
+  local Postgres; the branch side runs through a pool carrying `app.branch_mode=branch` so the real
+  outbox triggers fire; the e2e drives the real UI in a browser.
+* **Redis.** The full suite still needs a local Redis for the R2/F2/F3 tests; the run used
+  `redis:7-alpine` on 6379.

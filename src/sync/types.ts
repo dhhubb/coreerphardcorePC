@@ -18,7 +18,13 @@ export type SyncEventType =
   | 'payment'
   | 'credit_note'
   | 'stock_count'
-  | 'master_data';
+  | 'master_data'
+  // F5: the brief's vocabulary. `journal` and `stock_move` are the brief's spellings for a posted
+  // journal and a stock movement; `z_report` and `fiscal_result` are the new facts F5 emits.
+  | 'journal'
+  | 'stock_move'
+  | 'z_report'
+  | 'fiscal_result';
 
 /** One event as it sits in the branch outbox, and as it travels on the wire. */
 export interface SyncOutboxEvent {

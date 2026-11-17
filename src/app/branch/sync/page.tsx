@@ -17,6 +17,7 @@ interface ConflictRow {
   branch_seq: string | null;
   event_type: string | null;
   reason: string;
+  both_versions: { local?: unknown; cloud?: unknown };
   created_at: string;
 }
 
@@ -33,7 +34,18 @@ interface StatusPayload {
   conflicts: number;
   last_push_at: string | null;
   last_pull_at: string | null;
+  last_backup_at: string | null;
   recent_conflicts: ConflictRow[];
+}
+
+function summarise(value: unknown): string {
+  if (value === undefined || value === null) return '—';
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+  } catch {
+    return String(value);
+  }
 }
 
 export default function BranchSyncPage() {
@@ -81,6 +93,8 @@ export default function BranchSyncPage() {
             <dd>{status.last_pushed_seq}</dd>
             <dt>Last pulled cursor</dt>
             <dd>{status.last_pulled_cursor ?? '—'}</dd>
+            <dt>Last backup</dt>
+            <dd data-testid="last-backup-at">{status.last_backup_at ?? 'never'}</dd>
             <dt>Conflicts</dt>
             <dd data-testid="conflict-count">{status.conflicts}</dd>
           </dl>
@@ -96,6 +110,8 @@ export default function BranchSyncPage() {
                 <th>When</th>
                 <th>Type</th>
                 <th>Reason</th>
+                <th>Branch version</th>
+                <th>Cloud version</th>
               </tr>
             </thead>
             <tbody>
@@ -104,6 +120,8 @@ export default function BranchSyncPage() {
                   <td>{row.created_at}</td>
                   <td>{row.event_type ?? '—'}</td>
                   <td>{row.reason}</td>
+                  <td data-testid="conflict-local">{summarise(row.both_versions?.local)}</td>
+                  <td data-testid="conflict-cloud">{summarise(row.both_versions?.cloud)}</td>
                 </tr>
               ))}
             </tbody>

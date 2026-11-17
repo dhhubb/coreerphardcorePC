@@ -95,6 +95,8 @@ export const TENANT_TABLES: TenantTable[] = [
   { name: 'branch_master_data', scope: 'branch', highVolume: true, partitioned: false },
   { name: 'sync_conflicts', scope: 'branch', highVolume: true, partitioned: false },
   { name: 'sync_backups', scope: 'branch', highVolume: true, partitioned: false },
+  // F5 (sync engine completion): the price version each sale line charged.
+  { name: 'pos_sale_price_versions', scope: 'branch', highVolume: true, partitioned: false },
   // H6 (reports): the append-only daily product-sales facts and the report reads over them.
   { name: 'daily_product_sales', scope: 'branch', highVolume: true, partitioned: false },
 ];
@@ -614,6 +616,14 @@ export async function seedOneRowPerTenantTable(
        (org_id, branch_id, status, object_key, byte_size, checksum)
      values ($1, $2, 'uploaded', 'seed/backup.dump', 1024, 'seed')`,
     [orgId, branchId],
+  );
+
+  // F5 (sync engine completion): the price version a sale line charged.
+  await sql(
+    `insert into public.pos_sale_price_versions
+       (org_id, branch_id, sale_id, sale_created_at, line_no, unit_price, price_version)
+     values ($1, $2, $3, now(), 1, 10.0000, 1)`,
+    [orgId, branchId, randomUUID()],
   );
 
   // H6 (reports): one closed-day fact row for the seed product.

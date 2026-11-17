@@ -31,7 +31,7 @@ with tenant_tables as (
       'import_jobs', 'import_rows', 'import_mappings',
       'device_registrations', 'cashier_pins', 'sync_state',
       'sync_outbox', 'sync_inbox', 'master_data_changes', 'branch_master_data',
-      'sync_conflicts', 'sync_backups',
+      'sync_conflicts', 'sync_backups', 'pos_sale_price_versions',
       'daily_product_sales'
     )
 ),

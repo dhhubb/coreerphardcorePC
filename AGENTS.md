@@ -238,6 +238,7 @@ called them 32–35, but those are taken by Phase 1 sales). F1 (frontend shell +
 by R1/R2). F3 (operations / POS console completion) owns 122–127 (`tests/operations-f3.test.ts`,
 ADR-0070; the F3 brief called them 46–51, but those are taken by R2/H1). F4 (branch-server
 UI/behaviour completion) owns 128–130 (`tests/frontend-f4.test.ts`, ADR-0071; the F4 brief called
-them 16–18, but those are taken by R4/H1). A new
+them 16–18, but those are taken by R4/H1). F5 (sync engine completion) owns 131–135
+(`tests/sync-f5.test.ts`, ADR-0072; the F5 brief's own numbers collide with the tenancy tests). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).

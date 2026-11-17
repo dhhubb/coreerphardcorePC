@@ -28,6 +28,7 @@ const NAV: NavItem[] = [
   { href: '/admin/shifts', label: 'Shifts', testId: 'nav-shifts' },
   { href: '/reports?tab=z', label: 'Z-Reports', testId: 'nav-z-reports' },
   { href: '/admin/stocktake', label: 'Stock counts', testId: 'nav-stocktake' },
+  { href: '/admin/sync', label: 'Sync', testId: 'nav-sync' },
 ];
 
 function isActive(pathname: string, href: string): boolean {

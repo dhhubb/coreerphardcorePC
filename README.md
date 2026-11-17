@@ -34,6 +34,8 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [The frontend shell and sign-in (F1)](#the-frontend-shell-and-sign-in-f1)
 - [The admin products / pricing / promotions console (F2)](#the-admin-products--pricing--promotions-console-f2)
 - [The operations / POS console (F3)](#the-operations--pos-console-f3)
+- [The branch-server console (F4)](#the-branch-server-console-f4)
+- [The sync engine completion (F5)](#the-sync-engine-completion-f5)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -1092,6 +1094,42 @@ PIN sign-in, the PWA and tests 49–52; F4 adds the pieces the brief names that 
   `/_next/static/*`, `/pos`, `/login` and the `/admin/*` console, so a reload with the internet cut
   still renders the till. `/api/*` is never cached.
 
+## The sync engine completion (F5)
+
+F5 completes the sync engine (H2). It is additive: it changes no core table and no core posting
+function, and it edits only H2's own objects (ADR-0065, ADR-0072). H2 shipped the branch outbox, the
+idempotent cloud ingest, the master-data pull, the retry/conflict policy, the status read and the
+encrypted backup (tests 53–63). F5 adds the parts of the brief H2 left out:
+
+- **A rejection no longer blocks the batch.** `app.sync_push_result` applies every event it can and
+  returns `highest_seq` as the highest sequence it PROCESSED (applied, duplicated or rejected). One
+  malformed event in the middle is recorded as a rejection and the rest of the batch still applies;
+  the branch records the conflict (the durable record) and acks past it, so the outbox drains instead
+  of re-pushing the same bad event forever (test 131).
+- **Conflicts carry both versions.** `sync_conflicts.both_versions` holds `{ local, cloud }` — what
+  the branch sent and what the cloud answered — and `app.sync_record_conflict` stores it. The status
+  page and `/admin/sync` show both; `POST /api/sync/conflicts` with a `conflict_id` re-queues the
+  local event through `app.sync_requeue_conflict`, so "Retry failed" appends a fresh outbox event
+  without un-acking the original (`acked_at` is write-once) (test 132).
+- **Two new outbox facts.** A closed shift emits a `z_report` event (trigger on `z_reports`) and an
+  FDMS outcome emits a `fiscal_result` event (trigger on `fiscal_invoices` reaching `sent`/`failed`),
+  so the cloud learns both. The event-type check also carries the brief's `journal` and `stock_move`
+  spellings (test 133).
+- **A sale keeps the price version it charged.** `pos_sale_price_versions` (a new branch table,
+  immutable) records, per sale line, the price version that applied at the moment of the sale
+  (`price_version`, from `branch_master_data`). A later pull that bumps the mirror's version cannot
+  rewrite the sale (test 134).
+- **Backups are reported and shown.** `POST /api/backup` records a run (the object key, byte size and
+  the checksum of the ciphertext, never the plaintext); a trigger keeps `sync_state.last_backup_at`
+  current, so the status page shows the last backup (test 135).
+- **The sync console.** `/admin/sync` shows the outbox depth (`pending_count`), the last push/pull,
+  the last backup, the cloud protocol version and a protocol banner when a push is blocked, plus the
+  conflicts with both versions and a Retry button. It reads the branch's own database, so it answers
+  with the cloud offline.
+- **Master-data vocabulary.** The `master_data_changes` and `branch_master_data` entity-type checks
+  now also accept `customer` and `user`; the wiring is left to the vertical that owns the entity, so
+  no existing `change_seq` moves.
+
 ## Adding a vertical module
 
 A vertical (Retail, Pharmacy, Hardware, School) sits on top of the core. It never edits a core
@@ -1165,12 +1203,16 @@ scan. Output is written to `docs/perf/`. The run records timings and does not fa
 | 112–118 | F1: frontend shell and sign-in (email/password, `/api/auth/me`, app shell) | `tests/frontend-f1.test.ts` |
 | 119–121 | F2: admin products / pricing / promotions console | `tests/frontend-f2.test.ts` |
 | 122–127 | F3: operations, Z-report, receipt and stocktake UI | `tests/operations-f3.test.ts` |
+| 128–130 | F4: branch-server console (offline sale, PIN, badge, app shell) | `tests/frontend-f4.test.ts`, `e2e/branch-f4.e2e.ts` |
+| 131–135 | F5: sync engine completion (non-blocking reject, both versions, new facts, price version, backup) | `tests/sync-f5.test.ts`, `e2e/sync-f5.e2e.ts` |
 
 H1's tests are numbered 49–51 because R4 already owns 14–18 and R5 owns 19–24; the H1 brief called
 them 16–18. H2 continues from 52 (ADR-0033) and H3 from 63 (ADR-0038). ADR-0026, ADR-0033 and
 ADR-0038 record the mappings. F2 continues from F1's 118 (ADR-0069); F3 continues from F2's 121
-(ADR-0070). The F2 brief called its tests 43–45 and the F3 brief called its tests 46–51; those numbers
-are already taken by Phase 1 retail (R1/R2) and branch (H1) tests.
+(ADR-0070); F4 continues from F3's 127 (ADR-0071); F5 continues from F4's 130 (ADR-0072). The F2
+brief called its tests 43–45 and the F3 brief called its tests 46–51; those numbers are already taken
+by Phase 1 retail (R1/R2) and branch (H1) tests, and the F5 brief's own numbers collide with the
+tenancy tests, so F5 continues from 130.
 
 Test 13 is the keyboard-only Playwright run and test 14 is the offline reload-and-reconnect run;
 both live in `e2e/`. The admin consoles also carry navigation specs (`e2e/admin-ops.e2e.ts` for A3,

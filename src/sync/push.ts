@@ -5,11 +5,12 @@
  * cloud confirms it. The rules:
  *
  *   * Only ONE push is ever in flight per branch, so two ticks cannot deliver the same batch twice.
- *   * A batch is acked up to the highest sequence the cloud applied. A gap is never acked: the
- *     unacked events are re-pushed next tick, and the cloud dedupes them by event id.
+ *   * A batch is acked up to the highest sequence the cloud PROCESSED. The cloud applies every
+ *     event it can and reports the highest sequence it handled, so a rejected event no longer
+ *     blocks the events after it (F5) and the outbox can drain.
  *   * A network failure is retried forever with exponential backoff and jitter (never a conflict).
- *   * A real rejection (a 4xx naming events) is recorded as a conflict, and the branch acks past
- *     the rejected event so it can make progress; the rest of the batch is unaffected.
+ *   * A real rejection is recorded as a durable conflict carrying BOTH versions (what the branch
+ *     sent and what the cloud said), so the status page shows both and a human can re-queue it.
  */
 
 import type { PoolClient } from 'pg';
@@ -22,7 +23,7 @@ import {
   isRetryable,
   retryDelayMs,
 } from './retry';
-import type { PushResponse, SyncReject } from './types';
+import type { PushResponse, SyncOutboxEvent, SyncReject } from './types';
 
 /** How a batch reaches the cloud. Injectable so the worker can be tested without a live cloud. */
 export type PushDeliver = (events: import('./types').SyncOutboxEvent[]) => Promise<PushResponse>;
@@ -83,19 +84,15 @@ export async function pushOnce(ctx: PushContext): Promise<PushOutcome> {
     const response = await ctx.deliver(events);
     const rejected = response.rejects ?? [];
 
-    // Ack up to the highest sequence the cloud applied. A rejected event stops the ack there, so
-    // the branch records the conflict and re-pushes from the rejection on the next tick.
-    let ackTo = response.highest_seq ?? '0';
-    if (rejected.length > 0) {
-      const firstRejectedSeq = firstRejectedSeqOf(events, rejected);
-      if (firstRejectedSeq !== null) {
-        ackTo = highestSeqBelow(events, firstRejectedSeq);
-        for (const reject of rejected) {
-          await recordConflict(ctx, events, reject);
-        }
-      }
+    // Record a durable conflict for every rejection, carrying both versions, then ack up to the
+    // highest sequence the cloud processed. The cloud applies every event it can and reports the
+    // highest sequence it handled, so a rejected event is resolved (recorded as a conflict) and the
+    // outbox drains instead of re-pushing the same bad event forever.
+    for (const reject of rejected) {
+      await recordConflict(ctx, events, reject);
     }
 
+    const ackTo = response.highest_seq ?? '0';
     const acked = ackTo !== '0' ? await ackUpTo(ctx.client, ctx.orgId, ctx.branchId, ackTo) : 0;
 
     return {
@@ -110,9 +107,9 @@ export async function pushOnce(ctx: PushContext): Promise<PushOutcome> {
   } catch (error) {
     if (error instanceof SyncRejectionError) {
       // Should be rare: the cloud returns rejects inside a 200. Handled for completeness.
-      const ackTo = highestSeqBelow(events, firstRejectedSeqOf(events, error.rejects) ?? '0');
-      if (ackTo !== '0') await ackUpTo(ctx.client, ctx.orgId, ctx.branchId, ackTo);
       for (const reject of error.rejects) await recordConflict(ctx, events, reject);
+      const ackTo = highestSeqOf(events, error.rejects);
+      if (ackTo !== '0') await ackUpTo(ctx.client, ctx.orgId, ctx.branchId, ackTo);
       return { ...idle, idle: false, sent: events.length, rejected: error.rejects, ackedSeq: ackTo };
     }
     if (isRetryable(error)) {
@@ -132,12 +129,18 @@ export async function pushOnce(ctx: PushContext): Promise<PushOutcome> {
 
 async function recordConflict(
   ctx: PushContext,
-  events: import('./types').SyncOutboxEvent[],
+  events: SyncOutboxEvent[],
   reject: SyncReject,
 ): Promise<void> {
   const event = events.find((candidate) => candidate.event_id === reject.event_id);
+  const bothVersions = {
+    local: event
+      ? { seq: event.seq, event_type: event.event_type, payload: event.payload }
+      : { seq: '0', event_type: 'unknown', payload: {} },
+    cloud: { reason: reject.reason },
+  };
   await ctx.client.query(
-    'select app.sync_record_conflict($1, $2, $3, $4, $5, $6, $7::jsonb)',
+    'select app.sync_record_conflict($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)',
     [
       ctx.orgId,
       ctx.branchId,
@@ -146,26 +149,17 @@ async function recordConflict(
       event ? event.event_type : 'unknown',
       reject.reason,
       JSON.stringify({}),
+      JSON.stringify(bothVersions),
     ],
   );
 }
 
-function firstRejectedSeqOf(
-  events: import('./types').SyncOutboxEvent[],
-  rejects: SyncReject[],
-): string | null {
+/** The highest sequence among the rejected events, or '0' when none is in this batch. */
+function highestSeqOf(events: SyncOutboxEvent[], rejects: SyncReject[]): string {
   const ids = new Set(rejects.map((reject) => reject.event_id));
-  const first = events.find((event) => ids.has(event.event_id));
-  return first ? first.seq : null;
-}
-
-/** The highest sequence in `events` strictly below `seq`. '0' when none is below. */
-function highestSeqBelow(events: import('./types').SyncOutboxEvent[], seq: string): string {
   let best = '0';
   for (const event of events) {
-    if (compareSeq(event.seq, seq) < 0 && compareSeq(event.seq, best) > 0) {
-      best = event.seq;
-    }
+    if (ids.has(event.event_id) && compareSeq(event.seq, best) > 0) best = event.seq;
   }
   return best;
 }

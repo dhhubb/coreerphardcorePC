@@ -1630,3 +1630,88 @@ mock the database.
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F4
 builds neither.
+
+## ADR-0072 — F5 completes the sync engine; its tests are 131–135
+
+**Context.** The brief for this run is "RUN F5 — Sync engine (H2)". H2 already shipped in an earlier
+run: `supabase/migrations/20260101080000_sync_h2.sql`, `src/sync/*`, the thin push/pull routes, the
+conflict/retry policy, the encrypted backup and tests 53–63 (ADR-0033). This is the same situation
+F2 (ADR-0069), F3 (ADR-0070) and F4 (ADR-0071) faced: the requested backend largely exists, so the
+run is a completion slice over the gaps the brief names that H2 left backend-only. ADR-0065 governs
+the whole run: additive only, no core table or core function touched.
+
+The gaps, verified against the tree before writing anything:
+
+* `app.sync_push_result` **returned early on the first rejection**, so one bad event in the middle of
+  a batch stopped every event after it, and a permanently-rejected event was never acked — the branch
+  re-pushed it forever. The brief requires that a rejected event does not block the others.
+* `sync_conflicts` stored only a `reason` and a free-form `detail`; it did not carry **both versions**
+  (what the branch sent and what the cloud said), and there was no way to retry a conflict.
+* H2 emitted no outbox event for a **closed shift** or for an **FDMS outcome**, so the cloud never
+  learned those facts.
+* A sale did not record the **price version it charged**; a later pull could rewrite the price of a
+  past sale.
+* There was no endpoint to **report a backup**, and the status read had no **last-backup** time.
+* There was no `/admin/sync` console: no outbox depth under the brief's name, no both-version view,
+  no Retry, no protocol banner.
+
+**Decision.** F5 is delivered as an additive completion slice. It changes no core table and no core
+posting function, and it edits no applied migration; it edits only H2's own objects:
+
+1. **A non-blocking dispatcher.** `app.sync_push_result` applies every event it can, in its own
+   subtransaction, records each rejection and returns `highest_seq` as the highest sequence it
+   PROCESSED — applied, duplicated or rejected. A rejected event is therefore resolved (the conflict
+   is the durable record) and the branch acks past it, so the outbox drains. A human retry re-queues
+   it explicitly through `app.sync_requeue_conflict`.
+2. **Conflicts carry both versions.** `sync_conflicts.both_versions` holds `{ local, cloud }` and
+   `app.sync_record_conflict` gained an 8th argument (the old 7-argument signature is dropped, so
+   there is one function; a 7-argument call still resolves because the new argument has a default).
+   `app.sync_requeue_conflict` appends the local event to the outbox under a fresh event id, so
+   "Retry failed" gives it another chance without un-acking the original (`acked_at` is write-once).
+3. **Two new outbox facts.** A trigger on `z_reports` emits a `z_report` event and a trigger on
+   `fiscal_invoices` emits a `fiscal_result` event when the row reaches `sent`/`failed`. The event
+   type check also carries the brief's `journal` and `stock_move` spellings. Both triggers are
+   branch-only (`app.branch_mode_enabled()`), so the cloud's own writes never enqueue.
+4. **The price version a sale charged.** A new branch table `pos_sale_price_versions` (immutable,
+   RLS, the standard indexes) is written by a deferred constraint trigger on `pos_sales`: one row per
+   invoice line, carrying the `branch_master_data` price version at sale time. A later pull that
+   bumps the mirror cannot rewrite the sale.
+5. **Backups are reported and shown.** `POST /api/backup` records a run (object key, byte size and
+   the checksum of the ciphertext); a trigger keeps `sync_state.last_backup_at` current. `GET
+   /api/backup` lists the runs.
+6. **The sync console.** `/admin/sync` reads `GET /api/branch/sync/status` (the branch's own
+   database, so it answers with the cloud offline) and shows the outbox depth (`pending_count`), the
+   last push/pull, the last backup, the cloud protocol version, a protocol banner when a push is
+   blocked, and the conflicts with both versions and a Retry button (`POST /api/sync/conflicts`).
+   `app.sync_status` gained `pending_count` and `last_backup_at` while keeping every H2 key.
+7. **Master-data vocabulary.** The `master_data_changes` and `branch_master_data` entity-type checks
+   now also accept `customer` and `user`. No trigger records them here, so no existing `change_seq`
+   moves; the wiring is left to the vertical that owns the entity.
+
+**Consequence.** A rejected event no longer blocks or sticks the outbox, an operator can see both
+versions of a conflict and retry it, the cloud learns shift closes and FDMS outcomes, a past sale
+keeps the price it charged, and the console shows the last backup and the cloud protocol. The cost is
+a small additive diff — one migration, three routes (one new GET, one new POST), one page, and one
+new branch table.
+
+**Test numbering.** F5 owns **131–135** (ADR-0010: continue from the highest number actually present,
+which after F4 is 130). The brief's own test numbers collide with the tenancy tests (1–14); the
+mapping is recorded here.
+
+| F5 test | Canonical | Test |
+| --- | --- | --- |
+| rejection does not block the batch | 131 | A rejected event does not block the rest of the batch, and the outbox still drains |
+| conflict carries both versions + retry | 132 | A conflict records both versions, and retry re-queues the local event |
+| new facts enqueued | 133 | Closing a shift emits a `z_report` event and an FDMS outcome emits a `fiscal_result` event |
+| price version frozen at sale time | 134 | A sale line keeps the price version it charged, so a later pull cannot rewrite it |
+| backup reported | 135 | `POST /api/backup` records the run and updates the branch last-backup time |
+
+All five are Vitest tests in `tests/sync-f5.test.ts`, so `npm test` shows them (the brief's stop
+rule: a test counts only when `npm test` reports it). The console behaviour is additionally driven
+end to end by `e2e/sync-f5.e2e.ts`, an unnumbered smoke test in the style of F4's `e2e/branch-f4.e2e.ts`:
+it runs a branch-mode dev server, seeds a conflict, signs in with a PIN and walks `/admin/sync`
+(both versions shown, Retry re-queues the event).
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F5
+builds neither.
