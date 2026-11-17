@@ -32,6 +32,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [Branch server (H1)](#branch-server-h1)
 - [Offline sync engine (H2)](#offline-sync-engine-h2)
 - [The frontend shell and sign-in (F1)](#the-frontend-shell-and-sign-in-f1)
+- [The admin products / pricing / promotions console (F2)](#the-admin-products--pricing--promotions-console-f2)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -938,7 +939,7 @@ every row and a branch pulls the change on its next sync (ADR-0050).
 | `/admin/price-lists` | The org's retail / wholesale price lists (USD, ZAR, ZWG) and their item counts |
 | `/admin/price-lists/[id]/items` | The editable item table: inline price edit, bulk re-price by category, CSV (COPY) import, margin vs cost |
 | `/admin/customer-groups` | Groups mapped to a price list, with their members (contacts) |
-| `/admin/promotions` | Promotions by priority (drag-to-reorder), with an active/type filter |
+| `/admin/promotions` | Promotions by priority (drag-to-reorder, or up/down keys), a conditions builder, a stackable flag, and an active/type filter |
 | `/admin/pricing-preview` | Live preview of list price → promotion → manual discount, with the role's limit |
 | `/admin/laybys` | Laybys with a status filter; overdue `due_date` in red; complete (CORE invoice) or cancel (refund less fee) |
 | `/admin/laybys/[id]` | One layby: the deposit paid, the customer and the reservations held aside |
@@ -951,14 +952,25 @@ the same shape for `products`, `variants` and `batches`. A list is a keyset page
 `(created_at, id)` (default 50, maximum 100); the SQL guards the limit too. A write that names
 another org is refused with 403, and a duplicate (SQLSTATE 23505) or a bad argument (22023) is a 422.
 
-**Pricing (A2).** `/api/admin/price-lists`, `/api/admin/price-lists/[id]/items`,
-`/api/admin/customer-groups`, `/api/admin/customer-groups/[id]/members`, `/api/admin/promotions`,
-and `/api/admin/pricing-preview`. The console does not re-implement any pricing rule: it calls R2's
+**Pricing (A2).** `/api/admin/price-lists`, `/api/admin/price-lists/import`,
+`/api/admin/price-lists/[id]/items`, `/api/admin/customer-groups`,
+`/api/admin/customer-groups/[id]/members`, `/api/admin/promotions`, and
+`/api/admin/pricing-preview`. The console does not re-implement any pricing rule: it calls R2's
 `app.get_price` and `app.assert_manual_discount` (ADR-0054), and promotion writes go through
 `src/verticals/retail/pricing` so the `promos:{org_id}` cache is invalidated exactly as a till write
 does. Items import with COPY into a staging table and one merge (ADR-0055), the same pattern as the
-stocktake. A list is keyed by `kind` (one retail and one wholesale per org, ADR-0056), and a keyset
-cursor keeps microsecond precision so a bulk import pages correctly (ADR-0057).
+stocktake; both `/api/admin/price-lists/import` and the older `action:'import'` body call the one
+`importPriceListItems` implementation (ADR-0069). A list is keyed by `kind` (one retail and one
+wholesale per org, ADR-0056), and a keyset cursor keeps microsecond precision so a bulk import pages
+correctly (ADR-0057).
+
+**Promotions (F2).** The promotions form builds the `conditions` jsonb the pricing engine reads —
+`value`, `variant_ids`, `min_qty`, `min_subtotal` (`src/verticals/admin/promotionConditions.ts`); a
+`stackable` checkbox marks a promotion that may stack, shown as a badge on the row. Rows reorder by
+drag (HTML5) or by the up/down buttons, and a precedence legend states the order the preview and the
+till apply: group price list (fallback retail) → promotion by priority → manual discount. Every
+write invalidates `promos:{org_id}`, and the validity window is re-checked at evaluation time, so a
+stale cache entry cannot apply an expired promotion (ADR-0069).
 
 **Operations (A3).** `/api/admin/laybys` (list + complete/cancel), `/api/admin/laybys/[id]`,
 `/api/admin/returns` (list + create), `/api/admin/invoices/[id]/returnable-lines`,
@@ -1006,6 +1018,28 @@ every API call re-verifies the token on the server.
 
 **Demo data.** `npm run db:seed-demo` creates a demo org, an admin user (`admin@demo.com` /
 `admin123`), a branch, a till and ten products with barcodes, and prints the credentials.
+
+## The admin products / pricing / promotions console (F2)
+
+F2 completes the admin console over the catalogue and pricing backend that A1 and A2 built. It is
+additive: it changes no core table or function and re-implements no existing admin path (ADR-0069).
+The catalogue and pricing pages, their SQL, the COPY import and the live preview already exist
+(see [The admin console](#the-admin-console-catalogue-management)); F2 adds:
+
+- **A promotions conditions builder** on `/admin/promotions`, producing the four keys
+  `app.apply_promotions` reads (`value`, `variant_ids`, `min_qty`, `min_subtotal`), built in
+  `src/verticals/admin/promotionConditions.ts`. Only non-empty boxes are sent, so an untouched form
+  sends `{}`.
+- **A stackable flag and badge** — a checkbox on the form and a badge on the row.
+- **Drag-to-reorder** of promotion priority (HTML5 drag), with the up/down buttons kept as the
+  keyboard-accessible fallback. Both call the reorder endpoint, which invalidates `promos:{org_id}`.
+- **A precedence legend** stating the order the preview and the till apply: group price list
+  (fallback retail) → promotion by priority → manual discount.
+- **`POST /api/admin/price-lists/import`** — the brief's import endpoint, delegating to the same
+  `importPriceListItems` COPY path as the older `action:'import'` body, so there is one import.
+
+Every list is a keyset page on `(created_at, id)` (default 50, maximum 100); RLS is enforced from
+the token's `org_id` on every route, and a body naming another org is refused with 403.
 
 ## Adding a vertical module
 
@@ -1078,15 +1112,18 @@ scan. Output is written to `docs/perf/`. The run records timings and does not fa
 | 105–107 | A2: admin pricing UI (price lists, items, customer groups, promotions, preview) | `tests/admin-a2.test.ts` |
 | 108–111 | A3: admin operations UI (laybys, returns, shifts & Z-reports, stocktake) | `tests/admin-a3.test.ts` |
 | 112–118 | F1: frontend shell and sign-in (email/password, `/api/auth/me`, app shell) | `tests/frontend-f1.test.ts` |
+| 119–121 | F2: admin products / pricing / promotions console | `tests/frontend-f2.test.ts` |
 
 H1's tests are numbered 49–51 because R4 already owns 14–18 and R5 owns 19–24; the H1 brief called
 them 16–18. H2 continues from 52 (ADR-0033) and H3 from 63 (ADR-0038). ADR-0026, ADR-0033 and
-ADR-0038 record the mappings.
+ADR-0038 record the mappings. F2 continues from F1's 118 (ADR-0069); the F2 brief called its tests
+43–45, but those are Phase 1 retail tests.
 
 Test 13 is the keyboard-only Playwright run and test 14 is the offline reload-and-reconnect run;
-both live in `e2e/`. The e2e config starts its own dev server on port 12100 with its own dist dir
-(`.next-e2e`), so it never clashes with a running `npm run dev` and `npm run build` cannot clobber
-it:
+both live in `e2e/`. The admin consoles also carry navigation specs (`e2e/admin-ops.e2e.ts` for A3,
+`e2e/admin-products-pricing.e2e.ts` for F2) that walk the real UI. The e2e config starts its own dev
+server on port 12100 with its own dist dir (`.next-e2e`), so it never clashes with a running
+`npm run dev` and `npm run build` cannot clobber it:
 
 ```bash
 npm run test:e2e

@@ -121,8 +121,8 @@ export default function PriceListItemsPage({ params }: { params: { id: string } 
         const text = await file.text();
         const lines = parsePriceCsv(text);
         const payload = await adminPost<{ imported: number }>(
-          '/api/admin/price-lists',
-          { action: 'import', price_list_id: priceListId, lines },
+          '/api/admin/price-lists/import',
+          { price_list_id: priceListId, lines },
         );
         setStatus(`Imported ${payload.imported} items`);
         await loadFirstPage();

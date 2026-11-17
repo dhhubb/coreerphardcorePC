@@ -1611,3 +1611,85 @@ GET  /login                                      → 200, renders the sign-in fo
   The existing token-seeded e2e specs are unaffected.
 * **No test is mocked.** The F1 tests call the real route handlers, the real SQL and a real HS256
   signature, against the local Postgres.
+
+## F2 — Admin products, pricing and promotions console
+
+F2 is a UI-completion slice over the admin backend that already exists. A1 built the product
+catalogue console (categories, products, variants, barcodes), A2 built the pricing console (price
+lists, the COPY import, customer groups, promotions, the live preview) and R2 built the precedence
+engine and the `promos:{org_id}` Redis cache. F2 completes that surface with the pieces the brief
+names that A1/A2 left out, and adds the dedicated price-list import route — additively, changing no
+core table or function (ADR-0069).
+
+### What was built
+
+* **Promotions console** (`src/app/admin/promotions/page.tsx`):
+  * a **conditions builder** — value, variant ids, min qty, min subtotal, the four keys
+    `app.apply_promotions` reads (`src/verticals/admin/promotionConditions.ts` builds the jsonb;
+    only non-empty boxes are sent, so an untouched form sends `{}`);
+  * a **stackable** checkbox on the form and a **stackable badge** on the row;
+  * **drag-to-reorder** of priority (HTML5 drag), keeping the up/down buttons as the
+    keyboard-accessible fallback — both call the reorder endpoint, which invalidates the cache;
+  * a **precedence legend** (1. group price list → 2. promotion by priority → 3. manual discount);
+  * a conditions summary per row.
+* **`POST /api/admin/price-lists/import`** — the endpoint the brief names. It delegates to the same
+  `importPriceListItems` COPY path the existing `action:'import'` branch uses, so there is one
+  implementation of the import, not two. The price-list items page now calls it.
+* Everything else the brief lists already existed and is covered by A1/A2 tests 96–107; F2 does not
+  rewrite it.
+
+### The F2 tests (`tests/frontend-f2.test.ts`)
+
+| # | Test |
+| --- | --- |
+| 119 | A category, a product and a barcoded variant are created through the routes and found by search; another org sees none of it |
+| 120 | A USD retail list is priced through the COPY import and a promotion discounts through the Redis cache, invalidated on write |
+| 121 | A promotion past `valid_to` is not applied even with a fresh cache entry, and `get_price` reaches `price_list_items` by index |
+
+The brief numbered these 43–45, but 43–45 are Phase 1 retail tests (R1 owns 41–44, R2 owns 45–48).
+ADR-0010 forbids renumbering: a new run continues from the highest number actually present, which
+after F1 is 118. See ADR-0069.
+
+### Gate
+
+```
+$ npx supabase db reset
+Finished supabase db reset on branch master.   (all migrations apply to an empty DB)
+
+$ npm test
+ Test Files  25 passed (25)
+      Tests  182 passed (182)
+
+$ npm run build
+✓ Compiled successfully   (incl. /admin/products, /admin/categories, /admin/promotions,
+                           /admin/price-lists, /admin/pricing-preview, /api/admin/price-lists/import)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+
+$ npm run test:e2e
+6 passed (37.4s)   (incl. the new F2 console navigation spec, and A3's console navigation)
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0069); the tenant invariant checks still
+  return zero rows. The admin tables (price_lists, price_list_items, customer_groups, promotions,
+  discount_limits, manual_discounts) already carry `org_id NOT NULL`, `created_at NOT NULL`, forced
+  RLS and a `(org_id, created_at DESC, id DESC)` index (the branch-scoped `manual_discounts` uses
+  the `(org_id, branch_id, created_at DESC, id DESC)` variant) — from R2/A2.
+* **One import implementation.** The new route and the older `action:'import'` branch both call
+  `importPriceListItems`, so the COPY behaviour cannot drift between them.
+* **The console and the till cannot drift.** The preview and the promotions form both resolve
+  through `app.get_price`; the conditions builder only produces the keys that function reads.
+* **Cache safety.** A promotion write (create, update, deactivate, reorder) invalidates
+  `promos:{org_id}`; a stale cache entry cannot apply an expired promotion because the validity
+  window is re-checked at evaluation time (test 121).
+* **No test is mocked.** The F2 tests call the real route handlers with a real access token, against
+  the real local Postgres and the real local Redis. The e2e spec drives the real UI in a browser.

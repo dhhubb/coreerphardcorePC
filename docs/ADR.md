@@ -1409,3 +1409,44 @@ on the server (`withAuth` / `withUserContext`).
 **Consequence.** Signed-out navigation is redirected, the existing token-seeded specs are unaffected,
 and the token is checked where it actually matters — on the server. The cost is a brief client-side
 flash before the redirect, which is acceptable for a shell that already renders from token claims.
+
+## ADR-0069 — F2 is a UI-completion slice; its tests are 119–121
+
+**Context.** The F2 brief asks for an admin console covering categories, products, variants and
+barcodes, price lists (with a COPY import), promotions, and a live pricing preview. The repository
+already contains that backend and most of that UI: A1 built `/admin/categories`, `/admin/products`,
+`/admin/products/[id]/variants` and the barcode scanner over `app.create_*` SQL; A2 built
+`/admin/price-lists`, the inline item editor, the COPY import, `/admin/promotions` and
+`/admin/pricing-preview` over `app.get_price`; R2 built the precedence engine and the
+`promos:{org_id}` Redis cache (TTL 300s) that A2's writes invalidate. So F2 is not a green field: it
+is the completion of a surface that already exists, and re-implementing it would duplicate A1/A2 and
+risk drift between the console and the till.
+
+The brief also numbers its tests 43–45, but 43–45 are Phase 1 retail tests (R1 owns 41–44, R2 owns
+45–48). ADR-0010 forbids renumbering: a new run continues from the highest number actually present,
+which after F1 is 118.
+
+**Decision.** F2 is delivered as an additive UI-completion slice, with no change to any core table or
+function and no re-implementation of an existing admin path:
+
+* The **promotions form** gains the pieces the brief names that A2 left out: a `stackable` checkbox,
+  a **conditions builder** (value, variant_ids, min_qty, min_subtotal — the keys
+  `app.apply_promotions` actually reads), a **stackable badge** on the row, **drag-to-reorder** of
+  priority (HTML5 drag, with the existing up/down buttons kept as the keyboard-accessible fallback),
+  and a **precedence legend** (1. group price list, falling back to retail; 2. promotion by priority;
+  3. manual discount).
+* A dedicated **`POST /api/admin/price-lists/import`** route is added so the brief's endpoint exists;
+  it delegates to the same `importPriceListItems` COPY path the existing `action:'import'` branch
+  uses, so there is one implementation, not two.
+* Everything else the brief lists already exists and is covered by A1/A2 tests 96–107; F2 does not
+  rewrite it.
+
+F2 owns tests **119–121** in `tests/frontend-f2.test.ts`, one per brief test: 119 the
+category → product → variant → search flow with an org boundary; 120 a USD retail list priced and
+discounted through the Redis cache, invalidated on write; 121 an expired promotion not applied even
+when the cache entry is fresh, with `EXPLAIN` showing `get_price` reaches `price_list_items` by index.
+
+**Consequence.** The admin console is complete and consistent with the till (both call the same
+`app.get_price`), the brief's endpoint exists without duplicating the COPY import, and the test
+numbering continues without collisions. The cost is a deliberately small diff: F2 adds UI and one
+route, and records that the rest was already built rather than pretending to rebuild it.
