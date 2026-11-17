@@ -142,13 +142,57 @@ export function cloudBlockFetcher(input: {
     if (!response.ok) {
       throw new Error(`cloud refused a number block: ${response.status}`);
     }
-    const body = (await response.json()) as { block: RawIssuedBlock };
-    return toIssued(body.block);
+    const body = (await response.json()) as { block: Record<string, unknown> };
+    // The cloud claim route returns the block in the camelCase `IssuedBlock` shape. Accept the
+    // snake_case spelling too, so a proxy that renames keys cannot silently yield an undefined block.
+    const block = body.block;
+    return {
+      blockNo: String(block.blockNo ?? block.block_no),
+      firstValue: String(block.firstValue ?? block.first_value),
+      lastValue: String(block.lastValue ?? block.last_value),
+      size: Number(block.size),
+    };
   };
 }
 
 /** How many numbers must remain before the branch asks the cloud for the next block. */
 export const NUMBER_BLOCK_LOW_WATER = 20;
+
+/**
+ * The brief's low-water mark: top up when less than 20% of the active block is left. Expressed as a
+ * percentage so it scales with the block size the cloud issued.
+ */
+export const NUMBER_BLOCK_LOW_WATER_PERCENT = 20;
+
+/**
+ * The low-water threshold for a block: 20% of its size, at least one number. Falls back to the fixed
+ * `NUMBER_BLOCK_LOW_WATER` count when the active block's bounds are unknown (for example when the
+ * branch is already exhausted).
+ */
+export function lowWaterForBlock(status: NumberBlockStatus): number {
+  const first = status.firstValue != null ? Number(status.firstValue) : null;
+  const last = status.lastValue != null ? Number(status.lastValue) : null;
+  if (first === null || last === null || !Number.isFinite(first) || !Number.isFinite(last) || last < first) {
+    return NUMBER_BLOCK_LOW_WATER;
+  }
+  const size = last - first + 1;
+  return Math.max(1, Math.ceil((size * NUMBER_BLOCK_LOW_WATER_PERCENT) / 100));
+}
+
+/**
+ * How many numbers are left in the ACTIVE block alone. The brief tops up when the CURRENT block is
+ * nearly used up, so this is what the low-water test compares against — not the total headroom,
+ * which also counts any blocks already fetched ahead. Falls back to the total when the active
+ * block's bounds are unknown.
+ */
+export function activeBlockRemaining(status: NumberBlockStatus): number {
+  const next = status.nextValue != null ? Number(status.nextValue) : null;
+  const last = status.lastValue != null ? Number(status.lastValue) : null;
+  if (next === null || last === null || !Number.isFinite(next) || !Number.isFinite(last)) {
+    return status.remaining;
+  }
+  return Math.max(0, last - next + 1);
+}
 
 export interface EnsureBlockResult {
   status: NumberBlockStatus;
@@ -157,22 +201,26 @@ export interface EnsureBlockResult {
 
 /**
  * Request the next block BEFORE the current one is used up. Called on the branch after each sale
- * (or on a timer): when the remaining count falls to the low-water mark, fetch a block and store it.
- * A failed fetch is not fatal — the branch keeps using what it has — so an offline branch keeps
- * selling until its block really runs out.
+ * (or on a timer): when the ACTIVE block's remaining count falls to the low-water mark — 20% of the
+ * block by default, or an explicit `lowWater` count — fetch a block and store it. A failed fetch is
+ * not fatal — the branch keeps using what it has — so an offline branch keeps selling until its
+ * block really runs out.
  */
 export async function ensureNextBlock(
   client: PoolClient,
   fetchBlock: NumberBlockFetcher,
   input: { orgId: string; branchId: string; seriesCode?: string; lowWater?: number },
 ): Promise<EnsureBlockResult> {
-  const lowWater = input.lowWater ?? NUMBER_BLOCK_LOW_WATER;
   const before = await numberBlockStatus(client, input);
 
-  // Nothing to top up when a full block is still available, or when we are already exhausted (a
-  // fetch would only help if the cloud is reachable, and the sale path handles exhaustion).
-  if (!before.exhausted && before.remaining > lowWater) {
-    return { status: before, requested: false };
+  // Nothing to top up while the current block still has more than the low-water mark left. When the
+  // branch is exhausted we fall through and try a fetch (a fetch only helps if the cloud is
+  // reachable; the sale path handles the truly-exhausted case).
+  if (!before.exhausted) {
+    const threshold = input.lowWater ?? lowWaterForBlock(before);
+    if (activeBlockRemaining(before) > threshold) {
+      return { status: before, requested: false };
+    }
   }
 
   try {

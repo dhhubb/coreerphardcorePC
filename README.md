@@ -36,6 +36,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [The operations / POS console (F3)](#the-operations--pos-console-f3)
 - [The branch-server console (F4)](#the-branch-server-console-f4)
 - [The sync engine completion (F5)](#the-sync-engine-completion-f5)
+- [The fiscal and numbering completion (F6)](#the-fiscal-and-numbering-completion-f6)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -1130,6 +1131,45 @@ encrypted backup (tests 53–63). F5 adds the parts of the brief H2 left out:
   now also accept `customer` and `user`; the wiring is left to the vertical that owns the entity, so
   no existing `change_seq` moves.
 
+## The fiscal and numbering completion (F6)
+
+F6 completes the fiscal-and-numbering slice (H3). It is additive: it changes no core table and no
+core posting function, and it edits only H3's own objects (ADR-0065, ADR-0073). H3 shipped the FDMS
+queue, the worker loop, the `FdmsClient` interface, cloud-issued number blocks, the receipt's fiscal
+block and `/settings/fiscal` (tests 64–68, which already cover this brief's gate items 1, 2, 8, 24
+and 25). F6 closes the parts of the brief H3 left out:
+
+- **The queue row carries its invoice number.** `fiscal_invoices.invoice_number` (backfilled from
+  `invoices`) is written by `app.fiscal_invoice_enqueue` in the sale's own transaction, so a queue
+  row is self-describing. The brief's named queue index
+  `fiscal_invoices_org_branch_status_created_idx` on `(org_id, branch_id, status, created_at DESC)`
+  is added (test 136).
+- **The brief's number-block vocabulary.** `public.invoice_number_blocks` is a read-only VIEW over
+  `number_blocks` with the brief's column names (`start_number`, `end_number`, `current_number`,
+  `status` = `active`/`exhausted`). It is `security_invoker`, so `number_blocks`' tenant RLS still
+  applies — one org cannot read another org's blocks through it. `number_blocks` stays the only
+  writer; a duplicate table would be a second place for the same counter to drift.
+- **The brief's endpoints.** `GET /api/blocks/next` is the branch-side top-up (the same functions as
+  `GET/POST /api/fiscal/numbers`, under the brief's name); it tops up when the ACTIVE block's own
+  remaining count reaches the low-water mark. `POST /api/fiscal/retry` retries a failed fiscal
+  invoice addressed by body (`fiscal_invoice_id`).
+- **The brief's vocabulary.** `FDMSClient`, `MockFDMS` and `RealFDMS` are exported as aliases of
+  H3's `FdmsClient`, `MockFdmsClient` and `httpFdmsClient`. The mock gained a `delayMs` knob so two
+  workers really overlap in a test.
+- **Worker batch 10 and a 20% low-water mark.** The worker loop claims `FISCAL_WORKER_BATCH = 10`
+  rows per pass. `lowWaterForBlock` returns 20% of the active block's size, and `ensureNextBlock`
+  compares the active block's own remaining count against it — a block already fetched ahead does
+  not mask the current block running low (test 139).
+- **The brief's exact exhaustion message.** `app.claim_invoice_number` now raises "Invoice numbers
+  exhausted - connect to cloud to get new block" (the text still contains H3's "block exhausted"
+  phrase, so H3's test 67 regex keeps matching).
+- **A QR preview** on `/settings/fiscal`, rendered from the receipt's own `qrMatrix`, for a row whose
+  device answered with a QR payload.
+
+F6 also fixed a latent H3 bug: `cloudBlockFetcher` parsed the cloud's claim response as snake_case
+while the claim route serializes it as camelCase, so a branch fetching its first block over HTTP
+stored `undefined` bounds. The fetcher now accepts either spelling (ADR-0073).
+
 ## Adding a vertical module
 
 A vertical (Retail, Pharmacy, Hardware, School) sits on top of the core. It never edits a core
@@ -1205,14 +1245,17 @@ scan. Output is written to `docs/perf/`. The run records timings and does not fa
 | 122–127 | F3: operations, Z-report, receipt and stocktake UI | `tests/operations-f3.test.ts` |
 | 128–130 | F4: branch-server console (offline sale, PIN, badge, app shell) | `tests/frontend-f4.test.ts`, `e2e/branch-f4.e2e.ts` |
 | 131–135 | F5: sync engine completion (non-blocking reject, both versions, new facts, price version, backup) | `tests/sync-f5.test.ts`, `e2e/sync-f5.e2e.ts` |
+| 136–140 | F6: fiscal and numbering completion (invoice number, named index, backoff, exactly-once, block top-up) | `tests/fiscal-f6.test.ts` |
 
 H1's tests are numbered 49–51 because R4 already owns 14–18 and R5 owns 19–24; the H1 brief called
 them 16–18. H2 continues from 52 (ADR-0033) and H3 from 63 (ADR-0038). ADR-0026, ADR-0033 and
 ADR-0038 record the mappings. F2 continues from F1's 118 (ADR-0069); F3 continues from F2's 121
-(ADR-0070); F4 continues from F3's 127 (ADR-0071); F5 continues from F4's 130 (ADR-0072). The F2
+(ADR-0070); F4 continues from F3's 127 (ADR-0071); F5 continues from F4's 130 (ADR-0072); F6
+continues from F5's 135 (ADR-0073). The F2
 brief called its tests 43–45 and the F3 brief called its tests 46–51; those numbers are already taken
 by Phase 1 retail (R1/R2) and branch (H1) tests, and the F5 brief's own numbers collide with the
-tenancy tests, so F5 continues from 130.
+tenancy tests, so F5 continues from 130. The F6 brief's own numbers (1–25) collide with the tenancy
+and accounting tests, so F6 continues from 135.
 
 Test 13 is the keyboard-only Playwright run and test 14 is the offline reload-and-reconnect run;
 both live in `e2e/`. The admin consoles also carry navigation specs (`e2e/admin-ops.e2e.ts` for A3,

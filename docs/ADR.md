@@ -1715,3 +1715,99 @@ it runs a branch-mode dev server, seeds a conflict, signs in with a PIN and walk
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F5
 builds neither.
+
+## ADR-0073 — F6 completes the fiscal-and-numbering slice; its tests are 136–140
+
+**Context.** The brief for this run is "RUN H3 (now F6) — Fiscal and numbering". H3 already shipped
+in an earlier run: `supabase/migrations/20260101090000_fiscal_numbering_h3.sql`, `src/fiscal/*`
+(the FDMS adapter, the mock and HTTP clients, the queue, the worker loop, the number blocks), the
+fiscal and numbers routes, the `/settings/fiscal` page, the receipt's fiscal block, and tests 64–68.
+Those H3 tests already map onto this brief's gate items 1, 2, 8, 24 and 25 (queue table, worker
+loop, retry/backoff, number blocks, offline behaviour). This is the same situation F2 (ADR-0069),
+F3 (ADR-0070), F4 (ADR-0071) and F5 (ADR-0072) faced: the requested backend largely exists, so the
+run is a completion slice over the gaps the brief names that H3 left backend-only. ADR-0065 governs
+the whole run: additive only, no core table and no core posting function touched, no applied
+migration edited.
+
+The gaps, verified against the tree before writing anything:
+
+* The brief's schema lists **`fiscal_invoices.invoice_number`**; H3's table did not have it. The
+  number was only reachable by joining to `invoices`.
+* The brief names the queue index **(org_id, branch_id, status, created_at DESC)**. H3 had a
+  partial index on pending rows (the worker's index) but not this one.
+* The brief names a table **`invoice_number_blocks`** with columns `start_number`, `end_number`,
+  `current_number` and a `status` of `active`/`exhausted`. H3's table is `number_blocks` with
+  `first_value`, `last_value`, `next_value`.
+* The brief fixes the exhaustion message: **"Invoice numbers exhausted - connect to cloud to get
+  new block"**. H3 raised a shorter message.
+* The brief names the endpoints **`GET /api/blocks/next`** and **`POST /api/fiscal/retry`**. H3
+  shipped `GET/POST /api/fiscal/numbers` and `POST /api/fiscal/invoices/:id/retry` instead.
+* The brief names the interface **`FDMSClient`** with **`MockFDMS`** and **`RealFDMS`**
+  implementations; H3 used `FdmsClient` / `MockFdmsClient` / `httpFdmsClient`.
+* The brief's worker loop claims **limit 10** pending rows; H3's default was 50.
+* The brief's low-water mark is **20% of the block**; H3 used a fixed count of 20.
+* The admin page showed no **QR preview** for a sent invoice.
+
+**Decision.** F6 is delivered as an additive completion slice. It changes no core table and no core
+posting function, and it edits no applied migration; it edits only H3's own objects:
+
+1. **`fiscal_invoices.invoice_number`** — a nullable text column, backfilled from `invoices`, and
+   written by `app.fiscal_invoice_enqueue` (re-created to record it in the sale's own transaction).
+   A queue row is now self-describing.
+2. **The brief's named queue index** `fiscal_invoices_org_branch_status_created_idx` on
+   `(org_id, branch_id, status, created_at DESC)`. H3's partial pending index stays; this one serves
+   the admin page across every status.
+3. **`public.invoice_number_blocks`** — the brief's vocabulary as a read-only VIEW over
+   `number_blocks`, not a second table. `number_blocks` is already the system of record (H3 reserves
+   blocks against it with `FOR UPDATE`); a duplicate table would be a second place for the same
+   counter to drift. The view is created `WITH (security_invoker = true)` so `number_blocks`' tenant
+   RLS still applies and no org can read another org's blocks through it (a default view would run
+   as its owner and bypass RLS).
+4. **`app.claim_invoice_number`** — re-created with the brief's exact exhaustion sentence. The logic
+   is identical to H3; the raised text now *contains* H3's "block exhausted" phrase, so H3's test 67
+   regex keeps matching. The brief's sentence is the operator-facing part.
+5. **The brief's endpoints.** `GET /api/blocks/next` is the branch-side top-up H3's
+   `/api/fiscal/numbers` performs, over the same functions, under the brief's name; it tops up when
+   the *active* block's remaining count reaches the low-water mark. `POST /api/fiscal/retry` retries
+   a failed fiscal invoice addressed by body (`fiscal_invoice_id`) instead of by path.
+6. **The brief's vocabulary.** `FDMSClient`, `MockFDMS` and `RealFDMS` are exported as aliases of
+   H3's `FdmsClient`, `MockFdmsClient` and `httpFdmsClient` — no second implementation to drift. The
+   mock gained a `delayMs` knob so two workers really overlap in a test.
+7. **Worker batch 10 and a 20% low-water mark.** The worker loop's default batch is
+   `FISCAL_WORKER_BATCH = 10`. `lowWaterForBlock` returns 20% of the active block's size;
+   `ensureNextBlock` compares the active block's own remaining count against it, so a block already
+   fetched ahead does not mask the current block running low.
+8. **A QR preview** on `/settings/fiscal`, rendered from the receipt's own `qrMatrix`, for a row
+   whose device answered with a QR payload.
+
+**A latent H3 bug fixed in passing.** `cloudBlockFetcher` parsed the cloud's claim response as
+snake_case (`first_value`), but the claim route serializes the block as camelCase (`firstValue`). A
+branch fetching its first block over HTTP therefore stored `undefined` bounds — H3's test 67 used an
+in-process fetcher, so it never surfaced. F6's `GET /api/blocks/next` exercises the real HTTP path
+and exposed it; the fetcher now accepts either spelling.
+
+**Consequence.** A fiscal queue row carries the number it used, the admin page can show the device's
+QR, the brief's endpoints and vocabulary exist, the worker claims ten at a time and tops up at 20% of
+the block, and the offline exhaustion message is the brief's exact sentence. The cost is a small
+additive diff — one migration, two routes, one view, one page column.
+
+**Test numbering.** F6 owns **136–140** (ADR-0010: continue from the highest number actually present,
+which after F5 is 135). The brief's own test numbers (1–25) collide with the tenancy and accounting
+tests; the mapping is recorded here.
+
+| F6 test | Canonical | Test |
+| --- | --- | --- |
+| queue row carries the invoice number + named index | 136 | A sale inserts a pending fiscal row with its invoice number, and the named queue index exists |
+| retry with backoff; 5 failures then failed | 137 | A real FDMS rejection retries with backoff, and 5 rejections move the row to failed |
+| outage: queued, then exactly once | 138 | With FDMS down 10 sales queue 10 fiscal invoices; when it returns all 10 submit exactly once |
+| number blocks: top up, offline exhaustion, no reuse | 139 | `GET /api/blocks/next` tops up before the current block runs out; offline exhaustion fails clearly and reuses no number |
+| two workers, no double submit | 140 | Two fiscal workers running at once never submit the same invoice twice (SKIP LOCKED) |
+
+All five are Vitest tests in `tests/fiscal-f6.test.ts`, so `npm test` shows them (the brief's stop
+rule: a test counts only when `npm test` reports it). Test 139 drives the branch through a real HTTP
+call to a small fake cloud that delegates to the real claim route, so the branch and cloud really
+talk over the wire; no database is mocked.
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F6
+builds neither.

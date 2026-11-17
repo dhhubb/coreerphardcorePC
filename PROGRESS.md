@@ -1971,3 +1971,88 @@ $ npx playwright test e2e/sync-f5.e2e.ts
   outbox triggers fire; the e2e drives the real UI in a browser.
 * **Redis.** The full suite still needs a local Redis for the R2/F2/F3 tests; the run used
   `redis:7-alpine` on 6379.
+
+## F6 — Fiscal and numbering (H3) completion
+
+F6 is a completion slice over the fiscal-and-numbering engine H3 already shipped. H3 built the branch
+FDMS queue, the worker loop, the `FdmsClient` interface with a mock and an HTTP client, cloud-issued
+number blocks, the receipt's fiscal block and the `/settings/fiscal` page, with tests 64–68 — which
+already map onto this brief's gate items 1, 2, 8, 24 and 25 (queue table, worker loop,
+retry/backoff, number blocks, offline behaviour). F6 fills the named gaps H3 left, and it is
+additive: no core table or core function changed, no applied migration edited (ADR-0065, ADR-0073).
+
+### What was built
+
+* **The queue row carries its invoice number** (`supabase/migrations/20260101190000_fiscal_f6.sql`):
+  `fiscal_invoices.invoice_number` (backfilled from `invoices`), written by
+  `app.fiscal_invoice_enqueue` (re-created) in the sale's own transaction.
+* **The brief's named queue index** `fiscal_invoices_org_branch_status_created_idx` on
+  `(org_id, branch_id, status, created_at DESC)`. H3's partial pending index stays.
+* **The brief's number-block vocabulary.** `public.invoice_number_blocks` is a read-only VIEW over
+  `number_blocks` with `start_number`, `end_number`, `current_number` and `status`
+  (`active`/`exhausted`), created `WITH (security_invoker = true)` so `number_blocks`' tenant RLS
+  still applies. `number_blocks` stays the only writer — no second table for the same counter.
+* **The brief's endpoints.** `GET /api/blocks/next` (branch top-up under the brief's name, tops up at
+  the low-water mark) and `POST /api/fiscal/retry` (retry a failed fiscal invoice by body id).
+* **The brief's vocabulary.** `FDMSClient`, `MockFDMS` and `RealFDMS` exported as aliases of H3's
+  `FdmsClient`, `MockFdmsClient` and `httpFdmsClient`; the mock gained a `delayMs` knob.
+* **Worker batch 10 and a 20% low-water mark.** `FISCAL_WORKER_BATCH = 10`; `lowWaterForBlock`
+  returns 20% of the active block's size and `ensureNextBlock` compares the ACTIVE block's own
+  remaining count against it (a block fetched ahead does not mask the current one running low).
+* **The brief's exact exhaustion message.** `app.claim_invoice_number` raises "Invoice numbers
+  exhausted - connect to cloud to get new block" (still containing H3's "block exhausted" phrase, so
+  H3's test 67 regex keeps matching).
+* **A QR preview** on `/settings/fiscal`, rendered from the receipt's own `qrMatrix`.
+* **A latent H3 bug fixed.** `cloudBlockFetcher` parsed the cloud claim response as snake_case while
+  the claim route serializes it as camelCase, so a branch fetching its first block over HTTP stored
+  `undefined` bounds (H3's test 67 used an in-process fetcher). The fetcher now accepts either
+  spelling; F6's `GET /api/blocks/next` exposed it over the real HTTP path.
+
+### The F6 tests (`tests/fiscal-f6.test.ts`)
+
+The brief's own numbers (1–25) collide with the tenancy and accounting tests. ADR-0010 forbids
+renumbering: a new run continues from the highest number actually present, which after F5 is 135. See
+ADR-0073.
+
+| Canonical | Test |
+| --- | --- |
+| 136 | A sale inserts a pending fiscal row with its invoice number, and the named queue index exists |
+| 137 | A real FDMS rejection retries with backoff, and 5 rejections move the row to failed |
+| 138 | With FDMS down 10 sales queue 10 fiscal invoices; when it returns all 10 submit exactly once |
+| 139 | `GET /api/blocks/next` tops up before the current block runs out; offline exhaustion fails clearly and reuses no number |
+| 140 | Two fiscal workers running at once never submit the same invoice twice (SKIP LOCKED) |
+
+### Gate
+
+```
+$ npx supabase db reset
+Finished supabase db reset on branch f5-sync-engine-completion.   (all migrations apply to an empty DB, incl. 20260101190000)
+
+$ npm test
+ Test Files  29 passed (29)
+      Tests  204 passed (204)
+
+$ npm run build
+✓ Compiled successfully   (incl. the new /api/blocks/next and /api/fiscal/retry routes and the /settings/fiscal QR preview)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065, ADR-0073); the tenant invariant checks
+  still return zero rows. The `invoice_number_blocks` view is not a table, so
+  `scripts/check-tenant-tables.sql` (which filters `relkind in ('r','p')`) correctly ignores it.
+* **No test is mocked.** The F6 tests call the real SQL functions and TS wrappers against the real
+  local Postgres; the branch side runs through a pool carrying `app.branch_mode=branch`; test 139
+  drives `GET /api/blocks/next` through a real HTTP call to a small fake cloud that delegates to the
+  real claim route. The FDMS device is the in-memory mock — a real object with real state.
+* **Redis.** The full suite still needs a local Redis for the R2/F2/F3 tests; the run used
+  `redis:7-alpine` on 6379.

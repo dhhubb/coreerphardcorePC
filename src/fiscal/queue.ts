@@ -20,6 +20,12 @@ export type FiscalStatus = (typeof FISCAL_STATUSES)[number];
 /** Real rejections before a row moves to 'failed'. */
 export const FISCAL_MAX_ATTEMPTS = 5;
 
+/**
+ * The brief's worker batch: claim at most this many pending rows per pass. H3 claimed 50 by default;
+ * the worker loop now uses 10, so a pass is short and the row locks are held briefly.
+ */
+export const FISCAL_WORKER_BATCH = 10;
+
 export interface FiscalInvoiceRow {
   id: string;
   invoiceId: string;

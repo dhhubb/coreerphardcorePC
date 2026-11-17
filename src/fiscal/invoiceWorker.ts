@@ -1,7 +1,7 @@
 import { getPool } from '@/core/db';
 import { applyUserContext, type AuthClaims } from '@/core/auth';
 import type { FdmsClient } from './fdms';
-import { runFiscalPassOn, type FiscalPassResult } from './queue';
+import { FISCAL_WORKER_BATCH, runFiscalPassOn, type FiscalPassResult } from './queue';
 
 /**
  * The fiscal worker (H3). It runs on the branch server as a LOOP, not a 30-second cron: the branch
@@ -35,7 +35,7 @@ export async function runFiscalPass(
     const result = await runFiscalPassOn(client, fdms, {
       orgId: options.orgId,
       branchId: options.branchId,
-      ...(options.limit !== undefined ? { limit: options.limit } : {}),
+      limit: options.limit ?? FISCAL_WORKER_BATCH,
     });
     await client.query('commit');
     return result;

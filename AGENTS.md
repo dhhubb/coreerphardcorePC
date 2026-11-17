@@ -217,6 +217,14 @@ psql "$DATABASE_URL" -f scripts/check-tenant-tables.sql  # must be 0 rows
 * **The Playwright e2e needs its browser installed** (`npx playwright install chromium`) and its
   own dev server; a spec that needs branch-mode pages can spawn a second `npm run dev` with
   `BRANCH_MODE=branch` and its own `NEXT_DIST_DIR` (see `e2e/branch-f4.e2e.ts`).
+* **The cloud claim route serializes the number block as camelCase** (`blockNo`, `firstValue`,
+  `lastValue`), matching the TS `IssuedBlock` type. A fetcher that parses it as snake_case gets
+  `undefined` bounds and silently stores a useless block. `cloudBlockFetcher` now accepts either
+  spelling; a test that exercises the real HTTP path (not an in-process fetcher) is what catches it
+  (ADR-0073).
+* **A number-block top-up must compare the ACTIVE block's own remaining count, not the total
+  headroom.** Counting every fetched-ahead block makes the low-water test never fire while the
+  current block drains (ADR-0073).
 
 ## Test numbering
 
@@ -239,6 +247,8 @@ by R1/R2). F3 (operations / POS console completion) owns 122–127 (`tests/opera
 ADR-0070; the F3 brief called them 46–51, but those are taken by R2/H1). F4 (branch-server
 UI/behaviour completion) owns 128–130 (`tests/frontend-f4.test.ts`, ADR-0071; the F4 brief called
 them 16–18, but those are taken by R4/H1). F5 (sync engine completion) owns 131–135
-(`tests/sync-f5.test.ts`, ADR-0072; the F5 brief's own numbers collide with the tenancy tests). A new
+(`tests/sync-f5.test.ts`, ADR-0072; the F5 brief's own numbers collide with the tenancy tests). F6
+(fiscal and numbering completion) owns 136–140 (`tests/fiscal-f6.test.ts`, ADR-0073; the F6 brief's
+own numbers 1–25 collide with the tenancy and accounting tests). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).

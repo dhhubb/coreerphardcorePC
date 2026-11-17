@@ -1,6 +1,7 @@
 'use client';
 
 import { getToken } from '@/core/session';
+import { qrMatrix } from '@/verticals/pos/escpos';
 import { useCallback, useEffect, useState } from 'react';
 
 /**
@@ -9,6 +10,9 @@ import { useCallback, useEffect, useState } from 'react';
  * It reads GET /api/fiscal/invoices for the queue (with counts by status) and offers a retry for
  * failed rows and a manual submit for pending or failed rows. Every action goes through a thin route
  * handler; the page never talks to the database itself.
+ *
+ * A sent row shows a QR preview: the fiscal QR the device returned, rendered from the same `qrMatrix`
+ * the printed receipt uses, so the operator can confirm the device answered with a scannable symbol.
  */
 
 interface FiscalInvoice {
@@ -18,6 +22,7 @@ interface FiscalInvoice {
   status: 'pending' | 'sent' | 'failed';
   attempts: number;
   last_error: string | null;
+  fdms_response: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -25,6 +30,38 @@ interface QueuePayload {
   summary: { pending: number; sent: number; failed: number; total: number };
   invoices: FiscalInvoice[];
   next_cursor: { createdAt: string; id: string } | null;
+}
+
+/** A small inline QR preview from the fiscal QR payload, using the receipt's own encoder. */
+function QrPreview({ data }: { data: string }) {
+  const matrix = qrMatrix(data);
+  const quiet = 2;
+  const total = matrix.length + quiet * 2;
+  return (
+    <svg
+      data-testid="fiscal-qr"
+      role="img"
+      aria-label="Fiscal QR code"
+      width={96}
+      height={96}
+      viewBox={`0 0 ${total} ${total}`}
+      shapeRendering="crispEdges"
+    >
+      <rect x={0} y={0} width={total} height={total} fill="#fff" />
+      {matrix.map((row, r) =>
+        row.map((dark, c) =>
+          dark ? (
+            <rect key={`${r}-${c}`} x={c + quiet} y={r + quiet} width={1} height={1} fill="#000" />
+          ) : null,
+        ),
+      )}
+    </svg>
+  );
+}
+
+function qrPayload(row: FiscalInvoice): string | null {
+  const qr = row.fdms_response?.qr_code;
+  return typeof qr === 'string' && qr.length > 0 ? qr : null;
 }
 
 function authHeaders(): HeadersInit {
@@ -108,6 +145,7 @@ export default function FiscalSettingsPage() {
                 <th>Status</th>
                 <th>Attempts</th>
                 <th>Last error</th>
+                <th>QR</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -118,6 +156,13 @@ export default function FiscalSettingsPage() {
                   <td data-testid="fiscal-status">{row.status}</td>
                   <td>{row.attempts}</td>
                   <td>{row.last_error ?? '—'}</td>
+                  <td>
+                    {qrPayload(row) ? (
+                      <QrPreview data={qrPayload(row)!} />
+                    ) : (
+                      <span data-testid="fiscal-qr-none">—</span>
+                    )}
+                  </td>
                   <td>
                     {row.status === 'failed' && (
                       <button

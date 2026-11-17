@@ -35,24 +35,34 @@ export interface FdmsClient {
 }
 
 /**
+ * The brief names the interface `FDMSClient` with `MockFDMS` and `RealFDMS` implementations. Those
+ * are the same three objects as `FdmsClient` / `MockFdmsClient` / `httpFdmsClient`; the aliases are
+ * exported so a reader can use either vocabulary without a second implementation drifting.
+ */
+export type FDMSClient = FdmsClient;
+
+/**
  * A mock FDMS device. It is a real object with real state, not a test stub: it can be put into an
  * outage (every submit reports 'unreachable'), told to reject the next N submissions (real
- * rejections), and it records every invoice it actually accepted so a test can assert that no
- * invoice was submitted twice.
+ * rejections), told to delay every answer (so two workers really overlap), and it records every
+ * invoice it actually accepted so a test can assert that no invoice was submitted twice.
  */
 export class MockFdmsClient implements FdmsClient {
   /** When false, every submission reports 'unreachable' (a network outage). */
   online = true;
   /** How many of the next submissions to reject for real. */
   rejectionsRemaining = 0;
+  /** Milliseconds to wait before answering, so a test can force two workers to overlap. */
+  delayMs = 0;
   /** Every invoice id the device has ACCEPTED (sent). Used to prove exactly-once submission. */
   readonly accepted: string[] = [];
   /** Every submission the device has seen, in order. */
   readonly submissions: Array<{ invoiceId: string; attempt: number }> = [];
 
-  constructor(options: { online?: boolean; rejections?: number } = {}) {
+  constructor(options: { online?: boolean; rejections?: number; delayMs?: number } = {}) {
     this.online = options.online ?? true;
     this.rejectionsRemaining = options.rejections ?? 0;
+    this.delayMs = options.delayMs ?? 0;
   }
 
   /** Simulate a network outage. */
@@ -66,6 +76,9 @@ export class MockFdmsClient implements FdmsClient {
   }
 
   async submit(submission: FdmsSubmission): Promise<FdmsResult> {
+    if (this.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    }
     this.submissions.push({ invoiceId: submission.invoiceId, attempt: submission.attempt });
 
     if (!this.online) {
@@ -157,3 +170,9 @@ export function httpFdmsClient(
     },
   };
 }
+
+/** The brief's name for the mock device (`MockFDMS`). Same class as `MockFdmsClient`. */
+export const MockFDMS = MockFdmsClient;
+
+/** The brief's name for the real HTTP device (`RealFDMS`). Same factory as `httpFdmsClient`. */
+export const RealFDMS = httpFdmsClient;
