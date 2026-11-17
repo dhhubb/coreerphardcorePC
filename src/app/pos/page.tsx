@@ -9,6 +9,7 @@ import { enqueueSale, countPending, type OutboxSale } from '@/verticals/pos/outb
 import { syncOnce } from '@/verticals/pos/sync';
 import { RegisterServiceWorker } from '@/branch/RegisterServiceWorker';
 import { useBranchHealth, type BranchHealthState } from '@/branch/useBranchHealth';
+import { badgeClass, badgeState } from '@/branch/badge';
 import { Receipt58mm } from '@/verticals/pos/Receipt58mm';
 import { buildReceiptData, defaultShop } from '@/verticals/pos/receiptData';
 import { checkoutAndPrint, type CheckoutTimings } from '@/verticals/pos/checkout';
@@ -822,37 +823,20 @@ function SessionBar({
 
 /**
  * The branch/cloud status badge. Shown always, because a cashier must know whether the cloud is
- * reachable before they need it.
+ * reachable before they need it. The three colours the brief fixes: green when the branch and the
+ * cloud are both up, yellow when the LAN is up but the cloud is not, red when the branch itself
+ * cannot be reached. The decision lives in `badgeState` so it is unit-testable.
  */
 function CloudBadge({ health }: { health: BranchHealthState }) {
-  if (!health.branchReachable) {
-    return (
-      <p className="badge badge-down" data-testid="cloud-badge" data-status="branch-down">
-        Branch unreachable — sales queue locally
-      </p>
-    );
-  }
-
-  if (health.cloudStatus === 'online') {
-    return (
-      <p className="badge badge-up" data-testid="cloud-badge" data-status="online">
-        Cloud online
-      </p>
-    );
-  }
-
-  if (health.cloudStatus === 'incompatible') {
-    return (
-      <p className="badge badge-warn" data-testid="cloud-badge" data-status="incompatible">
-        Cloud version mismatch (branch {health.protocolVersion}, cloud {health.cloudProtocolVersion})
-        — sync paused
-      </p>
-    );
-  }
-
+  const badge = badgeState(health);
   return (
-    <p className="badge badge-off" data-testid="cloud-badge" data-status="offline">
-      Cloud offline — sales queue locally
+    <p
+      className={badgeClass(badge.tone)}
+      data-testid="cloud-badge"
+      data-status={badge.status}
+      data-tone={badge.tone}
+    >
+      {badge.label}
     </p>
   );
 }
@@ -891,7 +875,6 @@ const POS_STYLES = `
   .badge-up { background: #e6f4ea; color: #1a7f37; }
   .badge-off { background: #fdecea; color: #b3261e; }
   .badge-warn { background: #fff4e5; color: #b26a00; }
-  .badge-down { background: #eee; color: #555; }
   .right { border-left: 1px dashed #bbb; padding-left: 12px; }
   @media print {
     .left { display: none; }

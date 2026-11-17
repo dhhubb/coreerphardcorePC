@@ -1066,6 +1066,32 @@ The `/admin/shifts` page keeps its inline read-only Z-report and is still reacha
 keyboard-only sale, the split USD+ZWG tender, the 58 mm receipt, the layby/return/credit-limit pages
 and the set-based stocktake import — already exists and is covered by R3/R5/H4/A3 tests.
 
+## The branch-server console (F4)
+
+F4 completes the branch-server UI and behaviour. It is additive: it changes no core table or
+function and re-implements no existing path (ADR-0071). H1 shipped the branch-mode server, the local
+PIN sign-in, the PWA and tests 49–52; F4 adds the pieces the brief names that H1 left backend-only:
+
+- **A 6-digit device code.** `app.create_device_code(org_id, branch_id, till_id, ttl_minutes)` mints a
+  zero-padded 6-digit code, stores **only its sha256 hash**, expires after 10 minutes by default and
+  retries on a `code_hash` unique violation. Redemption reuses `app.register_device` (single use,
+  token stored as a hash), so the older `app.create_device_registration` hex code stays for
+  compatibility. `POST /api/branch/devices` mints one and `GET` lists the branch's devices (never a
+  hash); `/settings/devices` is the admin page.
+- **PIN mode on `/login`.** The page reads `GET /api/branch/config`. In branch mode it renders a
+  cashier picker (from `GET /api/branch/cashiers`, a SECURITY DEFINER read of `auth.users` scoped to
+  the branch) plus a PIN field and calls `POST /api/branch/login`; the PIN is verified locally, so
+  sign-in works with the internet off. In cloud mode the F1 email/password form is unchanged.
+- **The till registers itself.** `/pos/register` redeems a code once and stores the device token in
+  **IndexedDB** (`src/branch/deviceStore.ts`), the same store the outbox uses.
+- **Health keys and cadence.** `GET /api/branch/health` returns `branch_online`, `cloud_online` and
+  `outbox_size`; the till polls every 5 s (`branchHealthPollMs()`, `BRANCH_HEALTH_POLL_MS` overrides
+  it). The badge (`src/branch/badge.ts`) uses three colours: green (cloud online), yellow (LAN up,
+  cloud offline — shows the queued count), red (branch unreachable).
+- **The service worker caches the app shell.** `public/sw.js` (cache `erp-branch-v2`) precaches
+  `/_next/static/*`, `/pos`, `/login` and the `/admin/*` console, so a reload with the internet cut
+  still renders the till. `/api/*` is never cached.
+
 ## Adding a vertical module
 
 A vertical (Retail, Pharmacy, Hardware, School) sits on top of the core. It never edits a core

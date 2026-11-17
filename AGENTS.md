@@ -203,6 +203,20 @@ psql "$DATABASE_URL" -f scripts/check-tenant-tables.sql  # must be 0 rows
 * **A client page that reads `useSearchParams()` needs a `<Suspense>` boundary**, or
   `next build` fails with "useSearchParams should be wrapped in a suspense boundary" (`/login`
   does this).
+* **`authenticated` cannot read `auth.users`.** A branch read that needs a cashier's email label
+  (`app.list_branch_cashiers`) must be `SECURITY DEFINER`; a plain `select` as `authenticated` fails
+  with `permission denied for table users`. Scope it by its own parameters so it can only return the
+  caller's branch (ADR-0071).
+* **The branch outbox trigger only fires in branch mode.** A test that asserts a sale wrote an
+  outbox event must set `app.branch_mode=branch` on the connection (e.g. `pg` pool
+  `options: '-c app.branch_mode=branch'`); a plain client writes no outbox row (ADR-0025).
+* **The vitest suite needs a local Redis** for the R2/F2/F3 pricing-cache and live-sale rate-limit
+  tests; without it those tests fail with `ECONNREFUSED 127.0.0.1:6379`. Start one with
+  `docker run -d --name erp-redis -p 6379:6379 redis:7-alpine` (ADR-0027: Redis is cloud-only, so
+  this is a test-environment dependency, not a branch one).
+* **The Playwright e2e needs its browser installed** (`npx playwright install chromium`) and its
+  own dev server; a spec that needs branch-mode pages can spawn a second `npm run dev` with
+  `BRANCH_MODE=branch` and its own `NEXT_DIST_DIR` (see `e2e/branch-f4.e2e.ts`).
 
 ## Test numbering
 
@@ -222,6 +236,8 @@ called them 32–35, but those are taken by Phase 1 sales). F1 (frontend shell +
 (`tests/frontend-f1.test.ts`, ADR-0066). F2 (admin products / pricing / promotions console) owns
 119–121 (`tests/frontend-f2.test.ts`, ADR-0069; the F2 brief called them 43–45, but those are taken
 by R1/R2). F3 (operations / POS console completion) owns 122–127 (`tests/operations-f3.test.ts`,
-ADR-0070; the F3 brief called them 46–51, but those are taken by R2/H1). A new
+ADR-0070; the F3 brief called them 46–51, but those are taken by R2/H1). F4 (branch-server
+UI/behaviour completion) owns 128–130 (`tests/frontend-f4.test.ts`, ADR-0071; the F4 brief called
+them 16–18, but those are taken by R4/H1). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).

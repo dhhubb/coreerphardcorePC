@@ -36,3 +36,13 @@ export function cloudProbeTimeoutMs(): number {
   const raw = Number.parseInt(process.env.CLOUD_PROBE_TIMEOUT_MS ?? '', 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 1_500;
 }
+
+/**
+ * How often the till polls the branch health endpoint. The brief fixes five seconds: often enough
+ * that a cashier sees the cloud come back promptly, cheap enough that the branch (a single process
+ * on a shop mini PC) is not busy answering. `BRANCH_HEALTH_POLL_MS` overrides it for a test.
+ */
+export function branchHealthPollMs(): number {
+  const raw = Number.parseInt(process.env.BRANCH_HEALTH_POLL_MS ?? '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5_000;
+}

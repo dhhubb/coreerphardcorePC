@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { branchHealthPollMs } from './config';
 
 /**
  * The till's view of the branch's connectivity.
@@ -22,6 +23,8 @@ export interface BranchHealthState {
   cloudProtocolVersion: number | null;
   /** The branch must refuse to push (protocol mismatch). */
   pushBlocked: boolean;
+  /** Unacked outbox events, or null when the branch did not report a size. */
+  outboxSize: number | null;
 }
 
 const INITIAL: BranchHealthState = {
@@ -31,14 +34,16 @@ const INITIAL: BranchHealthState = {
   protocolVersion: null,
   cloudProtocolVersion: null,
   pushBlocked: false,
+  outboxSize: null,
 };
 
 /**
  * Poll the branch health endpoint on an interval. `probe` asks the branch to refresh its cloud
- * observation; leave it false for a cheap read of the last stored observation.
+ * observation; leave it false for a cheap read of the last stored observation. The default interval
+ * is five seconds (the brief's cadence).
  */
 export function useBranchHealth(options: { intervalMs?: number; probe?: boolean } = {}): BranchHealthState {
-  const { intervalMs = 15_000, probe = false } = options;
+  const { intervalMs = branchHealthPollMs(), probe = false } = options;
   const [state, setState] = useState<BranchHealthState>(INITIAL);
   const cancelled = useRef(false);
 
@@ -55,21 +60,24 @@ export function useBranchHealth(options: { intervalMs?: number; probe?: boolean 
           return;
         }
         const payload = (await response.json()) as {
-          branch_up: boolean;
+          branch_up?: boolean;
+          branch_online?: boolean;
           database_up: boolean;
           cloud_status: 'online' | 'offline' | 'incompatible';
           protocol_version: number;
           cloud_protocol_version: number | null;
           push_blocked: boolean;
+          outbox_size?: number | null;
         };
         if (cancelled.current) return;
         setState({
           cloudStatus: payload.cloud_status,
           databaseUp: payload.database_up,
-          branchReachable: payload.branch_up,
+          branchReachable: payload.branch_online ?? payload.branch_up ?? true,
           protocolVersion: payload.protocol_version,
           cloudProtocolVersion: payload.cloud_protocol_version,
           pushBlocked: payload.push_blocked,
+          outboxSize: payload.outbox_size ?? null,
         });
       } catch {
         // The branch itself is unreachable (LAN blip). The sale path still queues to the outbox.

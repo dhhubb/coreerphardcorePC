@@ -34,6 +34,9 @@ tests 112–118.
 | A2 | Admin pricing UI: price lists, items, customer groups, promotions, live preview | tests 105–107 | DONE |
 | A3 | Admin operations UI: laybys, returns, shifts & Z-reports, stocktake | tests 108–111 | DONE |
 | F1 | Frontend shell + sign-in: email/password auth, `/api/auth/me`, app shell | tests 112–118 | DONE |
+| F2 | Admin products/pricing/promotions console | tests 119–121 | DONE |
+| F3 | Operations, Z-report, receipt and stocktake UI | tests 122–127 | DONE |
+| F4 | Branch server UI/behaviour completion: device codes, PIN login, health, offline shell | tests 128–130 | DONE |
 
 ## M0 — Setup
 
@@ -1787,3 +1790,99 @@ $ npm run test:e2e
   the real local Postgres; the e2e spec drives the real UI in a browser. The cart test uses an
   in-memory `StateStorage` (a real storage implementation, not a stub of the store) because Node has
   no `localStorage`.
+
+## F4 — Branch server UI/behaviour completion
+
+F4 is a UI/behaviour completion slice over the branch-server surface H1 already shipped. H1 built
+the branch-mode server, the local Postgres, PIN sign-in, the PWA manifest/service worker, the LAN
+HTTPS script and tests 49–52. F4 completes the pieces the brief names that H1 left backend-only, and
+it is additive: no core table or core function changed, no applied migration edited (ADR-0065,
+ADR-0071).
+
+### What was built
+
+* **A 6-digit device code** (`supabase/migrations/20260101170000_frontend_f4_branch_ops.sql`,
+  `app.create_device_code(org_id, branch_id, till_id, ttl_minutes)`): mints a zero-padded 6-digit
+  code, stores **only its sha256 hash**, expires after 10 minutes by default, and retries on a
+  `code_hash` unique violation. It reuses the existing `app.register_device` redemption, so a code is
+  still single use and only the token's hash is stored (ADR-0024).
+* **Two branch reads.** `app.list_device_registrations(...)` (keyset page, never returns a hash) and
+  `app.list_branch_cashiers(org_id, branch_id)` (a display label for the PIN picker). The cashier
+  list is **SECURITY DEFINER** because it joins `auth.users` for the label and `authenticated` cannot
+  read `auth.users`; it is scoped by its own parameters, so it can only return the caller's branch.
+* **The branch console pages.** `/settings/devices` mints a code (shown once) and lists the branch's
+  devices; `/pos/register` redeems a code once and stores the device token in **IndexedDB**
+  (`src/branch/deviceStore.ts`).
+* **PIN mode on `/login`.** The page reads `GET /api/branch/config`; in branch mode it renders a
+  cashier picker plus a PIN field and calls `POST /api/branch/login` (the PIN is verified locally, no
+  cloud call). In cloud mode the F1 email/password form is unchanged.
+* **Health keys and cadence.** `GET /api/branch/health` now also returns `branch_online`,
+  `cloud_online` and `outbox_size`; `branchHealthPollMs()` fixes the poll at 5 s
+  (`BRANCH_HEALTH_POLL_MS` overrides it in a test). The badge uses the brief's three colours — green
+  (cloud online), yellow (LAN up, cloud offline), red (branch unreachable) — and shows the queued
+  count. The decision is the pure `src/branch/badge.ts`.
+* **The service worker caches the app shell.** `public/sw.js` (cache `erp-branch-v2`) precaches
+  `/_next/static/*`, `/pos`, `/login` and the `/admin/*` console at install, so a reload with the
+  internet cut still renders the till. `/api/*` is never cached.
+
+### The F4 tests (`tests/frontend-f4.test.ts`)
+
+| # | Test |
+| --- | --- |
+| 128 | A branch sale completes with the cloud unreachable (real Toxiproxy cuts the cloud) |
+| 129 | A cashier signs in with a PIN with the internet off (no cloud call) |
+| 130 | The till badge reports green/yellow/red, and the app shell is the cached one offline |
+| F4-a | The device code is 6 digits, single use, expires, and only its hash is stored |
+| F4-b | The cashier list returns a label and never a hash, scoped to the branch |
+| F4-c | Branch health reports `branch_online`, `cloud_online` and the outbox depth |
+
+The brief numbers these 16–18, which collide with R4's 14–18 and H1's 49–51. ADR-0010 forbids
+renumbering: a new run continues from the highest number actually present, which after F3 is 127.
+See ADR-0071. The browser behaviour of 18 is also driven end to end by `e2e/branch-f4.e2e.ts`
+(unnumbered, the F3 style): a branch-mode dev server walks `/login` (PIN), `/settings/devices`
+(mint a code), `/pos/register` (redeem it) and `/pos` (the badge shows cloud-offline while the LAN
+is up).
+
+The brief's harness is "real Postgres + Toxiproxy + Playwright". `tests/support/toxiproxy.ts` runs
+the real `ghcr.io/shopify/toxiproxy` image via `docker run` (no new dependency) and cuts the link to
+the cloud with a `timeout` toxic; when Docker or the image is unavailable it degrades to a
+`127.0.0.1:9` refused connection, which is the same observable fact. The database is never mocked.
+
+### Gate
+
+```
+$ npx supabase db reset
+Finished supabase db reset on branch master.   (all migrations apply to an empty DB, incl. 20260101170000)
+
+$ npm test
+ Test Files  27 passed (27)
+      Tests  194 passed (194)
+
+$ npm run build
+✓ Compiled successfully   (incl. the new /settings/devices and /pos/register pages)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+
+$ npm run test:e2e
+F4 spec: 1 passed; the existing branch/pos specs (52, 14) still pass
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065, ADR-0071); the tenant invariant checks
+  still return zero rows.
+* **The branch never trusts `navigator.onLine`.** The badge reflects the branch's own health probe of
+  the cloud, which is exactly the "LAN up, internet down" case a branch must report as cloud-offline.
+* **No test is mocked.** The F4 tests call the real SQL functions and TS wrappers against the real
+  local Postgres; test 128 runs a real Toxiproxy; the e2e drives the real UI in a browser.
+* **Redis.** The suite needs a local Redis for the R2/F2/F3 pricing-cache and rate-limit tests; the
+  run started `redis:7-alpine` on 6379 so the full suite (including those pre-existing tests) is
+  green. Without Redis those 12 tests fail with `ECONNREFUSED 127.0.0.1:6379` — an environment gap,
+  not a code change.

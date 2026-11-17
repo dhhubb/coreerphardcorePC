@@ -1536,3 +1536,97 @@ has no `status` column; "open" is `total > amount_paid`. R5 added `invoices_org_
 (org_id, contact_id, created_at DESC, id DESC)`, and Phase 1 already had the partial
 `invoices_open_idx (org_id, contact_id) WHERE total > amount_paid`. Together they index exactly the
 open-balance sum `check_credit` runs, so no new index is added.
+
+## ADR-0071 — F4 completes the branch-server surface; its tests are 128–130
+
+**Context.** The brief for this run is "RUN H1 (now F4): Branch server foundation". H1 already
+shipped in an earlier run: `supabase/migrations/20260101070000_branch_h1.sql`, `src/branch/*`, the
+thin branch routes, the PWA manifest and service worker, the LAN HTTPS script, and tests 49–51 plus
+the e2e at 52 (ADR-0023 to ADR-0027). This is the same situation F2 (ADR-0069) and F3 (ADR-0070)
+faced: the requested backend largely exists, so the run is a completion slice over the gaps the
+brief names that H1 left as backend-only. ADR-0065 governs the whole run: additive only, no core
+table or core function touched.
+
+The gaps, verified against the tree before writing anything:
+
+* There was no `/settings/devices` page and no `/pos/register` page; a device code could only be
+  minted through the API, and nothing stored a device token on the till.
+* The device code was a 64-character hex string, not the **6-digit** code the brief specifies, and
+  it did not expire after 10 minutes.
+* `/login` was email/password only; it had no **PIN mode** for branch mode.
+* `GET /api/branch/health` returned `branch_up`/`cloud_status`/`protocol_version` but not the
+  `branch_online` / `cloud_online` / `outbox_size` the brief names, and the till polled every 15 s,
+  not the brief's 5 s.
+* The service worker cached `/pos` only, not the app shell (`/_next/static/*`, `/login`, `/admin`).
+
+**Decision.** F4 is delivered as an additive completion slice. It changes no core table and no core
+function signature, and it edits no applied migration:
+
+1. **A 6-digit device code.** `app.create_device_code(org_id, branch_id, till_id, ttl_minutes)` mints
+   a zero-padded 6-digit code, stores **only its sha256 hash** (`app.hash_secret`), sets a 10-minute
+   expiry by default, and retries on a `unique_violation` of `code_hash` (six digits is a small
+   space). It reuses the existing `app.register_device` redemption path unchanged, so a code is still
+   single use and only the token's hash is stored (ADR-0024). The older
+   `app.create_device_registration` (24-hour hex code) stays for compatibility.
+2. **Two reads for the branch console.** `app.list_device_registrations(...)` is a keyset page of a
+   branch's devices that never returns a hash. `app.list_branch_cashiers(org_id, branch_id)` returns
+   the branch's cashiers with a display label for the PIN picker. The latter is **SECURITY DEFINER**
+   because it joins `auth.users` for the label and `authenticated` cannot read `auth.users`
+   (verified: `permission denied for table users`); it is scoped by its own parameters, so it can
+   only ever return the caller's branch. Both are reached before a till has a token, so the routes
+   derive the scope from the branch's own environment — the same pattern the branch login route
+   already uses — rather than from a bearer token.
+3. **The branch console.** `/settings/devices` mints a code (shown once, large and letter-spaced) and
+   lists the branch's devices with a derived status. `/pos/register` redeems a code once and stores
+   the device token in **IndexedDB** (`src/branch/deviceStore.ts`), not localStorage: the token is a
+   durable credential and IndexedDB is the store the outbox already uses.
+4. **PIN mode on `/login`.** The page reads `GET /api/branch/config`; in branch mode it renders a
+   cashier picker plus a PIN field, calls `POST /api/branch/login`, and stores the branch token. In
+   cloud mode it renders the F1 email/password form unchanged. Until the config answers, the cloud
+   form shows, which is the correct default (an unset `BRANCH_MODE` is never branch mode).
+5. **Health keys and cadence.** `GET /api/branch/health` now also returns `branch_online`,
+   `cloud_online` and `outbox_size` (the unacked outbox depth, read inside the caller's transaction).
+   `branchHealthPollMs()` fixes the poll at 5 s (`BRANCH_HEALTH_POLL_MS` overrides it for a test).
+   The badge keeps its `data-status` values and now uses the brief's three colours: green (cloud
+   online), yellow (LAN up, cloud offline — the `incompatible` case stays a warning), red (branch
+   unreachable), and it shows the queued count.
+6. **The service worker caches the app shell.** `public/sw.js` (cache `erp-branch-v2`) precaches
+   `/_next/static/*`, `/pos`, `/login` and `/admin` at install and refreshes an app-shell page on
+   each successful navigation, so a reload with the network cut still renders the till. `/api/*` is
+   still never cached.
+
+**Consequence.** A branch is now operable end to end from the UI: an admin mints a code, a till
+registers, a cashier signs in with a PIN, the till reports branch/cloud/outbox health every five
+seconds, and the shell loads offline. The cost is a small additive diff — one migration, three pages
+(one rewritten), three routes (one extended), and one browser store.
+
+**Test numbering.** F4 owns **128, 129 and 130** (ADR-0010: continue from the highest number actually
+present, which after F3 is 127). The brief numbers its three tests 16–18, which collide with R4's
+14–18 and H1's 49–51; the mapping is recorded here.
+
+| F4 spec | Canonical | Test |
+| --- | --- | --- |
+| 16 | 128 | A sale completes with the cloud unreachable (Toxiproxy cuts the cloud) |
+| 17 | 129 | A cashier signs in with a PIN with the internet off (no cloud call) |
+| 18 | 130 | The till badge reports green/yellow/red and the app shell is the cached one offline |
+
+All three are Vitest tests in `tests/frontend-f4.test.ts`, so `npm test` shows them (the brief's stop
+rule: a test counts only when `npm test` reports it). The file also carries three supporting tests
+(`F4-a` device code, `F4-b` cashier list, `F4-c` health keys) for the surface this run adds. The
+browser behaviour of test 18 is additionally driven end to end by `e2e/branch-f4.e2e.ts`, an
+unnumbered smoke test in the style of F3's `e2e/operations-f3.e2e.ts`: it runs a branch-mode dev
+server and walks `/login` (PIN), `/settings/devices` (mint a code), `/pos/register` (redeem it) and
+`/pos` (the badge shows cloud-offline while the LAN is up).
+
+**Note on Toxiproxy.** The brief's test harness is "real Postgres + Toxiproxy + Playwright". F4 adds
+`tests/support/toxiproxy.ts`, which runs the real `ghcr.io/shopify/toxiproxy` image (started via
+`docker run`, no new dependency) and gives the suite a proxy whose link to the cloud can be cut with a
+`timeout` toxic. Test 128 uses it to prove that a branch sale commits while the cloud is unreachable:
+the sale posts to the branch's own database, so the cut cloud cannot block it. When Docker or the
+image is unavailable the helper degrades to a `127.0.0.1:9` refused connection, which is the same
+observable fact (an unreachable cloud); the test still exercises the real branch path and does not
+mock the database.
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F4
+builds neither.

@@ -1,23 +1,32 @@
 import type { PoolClient } from 'pg';
 import { NextResponse } from 'next/server';
-import { ApiError, jsonError, toErrorResponse } from '@/app/api/_lib';
+import { ApiError, jsonError, parseCursor, parseLimit, toErrorResponse } from '@/app/api/_lib';
 import { withUserContext, type AuthClaims } from '@/core/auth';
 import { isBranchMode } from '@/branch/config';
-import { authenticateDevice, createDeviceRegistration, registerDevice } from '@/branch/device';
+import {
+  authenticateDevice,
+  createDeviceCode,
+  createDeviceRegistration,
+  listDeviceRegistrations,
+  registerDevice,
+} from '@/branch/device';
 
 /**
  * Device registration (decision 12).
  *
  * POST /api/branch/devices with `action`:
- *   create   — an admin mints a one-time code for a till.
- *   register — a till redeems the code once and receives a device token.
- *   verify   — verify a device token.
+ *   create_code — an admin mints a 6-DIGIT one-time code (10-minute expiry) for a till.
+ *   create      — an admin mints a longer one-time code (kept for compatibility).
+ *   register    — a till redeems the code once and receives a device token.
+ *   verify      — verify a device token.
+ *
+ * GET /api/branch/devices — a keyset page of the branch's registered devices (no hash returned).
  *
  * Only hashes are stored; the raw code and the raw token exist only in the responses.
  */
 
 interface DeviceBody {
-  action: 'create' | 'register' | 'verify';
+  action: 'create_code' | 'create' | 'register' | 'verify';
   org_id?: string;
   branch_id?: string;
   till_id?: string;
@@ -25,6 +34,7 @@ interface DeviceBody {
   token?: string;
   label?: string | null;
   ttl_hours?: number;
+  ttl_minutes?: number;
 }
 
 function scopeFrom(body: DeviceBody, claims: AuthClaims | null): { orgId: string; branchId: string } {
@@ -35,6 +45,40 @@ function scopeFrom(body: DeviceBody, claims: AuthClaims | null): { orgId: string
   return { orgId, branchId };
 }
 
+/**
+ * GET /api/branch/devices — a keyset page of the branch's registered devices.
+ *
+ * The /settings/devices page reads this. A branch is scoped by the token (or, before a till is
+ * registered, by the branch's own environment). No hash is ever returned.
+ */
+export async function GET(request: Request): Promise<NextResponse> {
+  if (!isBranchMode()) {
+    return jsonError(404, 'device registration is only available in branch mode');
+  }
+  try {
+    const url = new URL(request.url);
+    const limit = parseLimit(url.searchParams);
+    const cursor = parseCursor(url.searchParams);
+    const orgId = url.searchParams.get('org_id') ?? process.env.BRANCH_ORG_ID ?? null;
+    const branchId = url.searchParams.get('branch_id') ?? process.env.BRANCH_ID ?? null;
+    if (!orgId) throw new ApiError(422, 'org_id is required');
+    if (!branchId) throw new ApiError(422, 'branch_id is required');
+
+    const rows = await withAdminContext(orgId, branchId, (client) =>
+      listDeviceRegistrations(client, {
+        orgId,
+        branchId,
+        limit,
+        afterCreatedAt: cursor?.createdAt ?? null,
+        afterId: cursor?.id ?? null,
+      }),
+    );
+    return NextResponse.json({ devices: rows });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
   if (!isBranchMode()) {
     return jsonError(404, 'device registration is only available in branch mode');
@@ -42,6 +86,20 @@ export async function POST(request: Request): Promise<NextResponse> {
   try {
     const body = (await request.json()) as DeviceBody;
     const { orgId, branchId } = scopeFrom(body, null);
+
+    if (body.action === 'create_code') {
+      if (!body.till_id) throw new ApiError(422, 'till_id is required');
+      const code = await withAdminContext(orgId, branchId, (client) =>
+        createDeviceCode(client, {
+          orgId,
+          branchId,
+          tillId: body.till_id!,
+          ...(body.ttl_minutes !== undefined ? { ttlMinutes: body.ttl_minutes } : {}),
+        }),
+      );
+      // The raw 6-digit code is returned exactly once. Only its hash is stored.
+      return NextResponse.json({ code, expires_in_minutes: body.ttl_minutes ?? 10 });
+    }
 
     if (body.action === 'create') {
       if (!body.till_id) throw new ApiError(422, 'till_id is required');
@@ -78,7 +136,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       return NextResponse.json({ ok: true, registration_id: id });
     }
 
-    throw new ApiError(422, `unknown action ${body.action}`);
+    throw new ApiError(422, `unknown action ${(body as { action: string }).action}`);
   } catch (error) {
     return toErrorResponse(error);
   }

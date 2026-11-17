@@ -79,3 +79,26 @@ export async function managerOverride(
   );
   return result.rows[0]!.app;
 }
+
+export interface BranchCashierRow {
+  cashier_id: string;
+  label: string;
+  is_manager: boolean;
+  is_active: boolean;
+  locked_until: string | null;
+}
+
+/**
+ * The branch's cashiers for the PIN sign-in picker. No hash is returned; the label is the
+ * cashier's email (or a short id when there is none).
+ */
+export async function listBranchCashiers(
+  client: PoolClient,
+  input: { orgId: string; branchId: string },
+): Promise<BranchCashierRow[]> {
+  const result = await client.query<BranchCashierRow>(
+    'select cashier_id, label, is_manager, is_active, locked_until from app.list_branch_cashiers($1, $2)',
+    [input.orgId, input.branchId],
+  );
+  return result.rows;
+}

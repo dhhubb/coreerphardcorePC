@@ -31,6 +31,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     return NextResponse.json({
       mode: branchMode(),
       branch_up: true,
+      branch_online: true,
       protocol_version: BRANCH_PROTOCOL_VERSION,
       cloud_url: cloudUrl(),
     });
@@ -54,12 +55,15 @@ export async function GET(request: Request): Promise<NextResponse> {
       return NextResponse.json({
         mode: branchMode(),
         branch_up: true,
+        branch_online: true,
         database_up: dbUp,
         protocol_version: BRANCH_PROTOCOL_VERSION,
         cloud_url: cloudUrl(),
         cloud_status: 'offline',
+        cloud_online: false,
         cloud_protocol_version: null,
         push_blocked: false,
+        outbox_size: null,
       });
     } finally {
       client.release();
@@ -69,12 +73,15 @@ export async function GET(request: Request): Promise<NextResponse> {
     return NextResponse.json({
       mode: branchMode(),
       branch_up: false,
+      branch_online: false,
       database_up: false,
       protocol_version: BRANCH_PROTOCOL_VERSION,
       cloud_url: cloudUrl(),
       cloud_status: 'offline',
+      cloud_online: false,
       cloud_protocol_version: null,
       push_blocked: false,
+      outbox_size: null,
     });
   }
 }

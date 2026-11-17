@@ -13,3 +13,4 @@ test-results/
 playwright-report/
 .next-e2e/
 certs/
+.next-e2e-f4/
