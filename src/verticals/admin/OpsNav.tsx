@@ -7,6 +7,7 @@ const LINKS: Array<{ href: string; label: string }> = [
   { href: '/admin/laybys', label: 'Laybys' },
   { href: '/admin/returns', label: 'Returns' },
   { href: '/admin/shifts', label: 'Shifts & Z-reports' },
+  { href: '/admin/z-reports', label: 'Z-report slips' },
   { href: '/admin/stocktake', label: 'Stocktake' },
 ];
 

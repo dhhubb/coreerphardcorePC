@@ -33,6 +33,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [Offline sync engine (H2)](#offline-sync-engine-h2)
 - [The frontend shell and sign-in (F1)](#the-frontend-shell-and-sign-in-f1)
 - [The admin products / pricing / promotions console (F2)](#the-admin-products--pricing--promotions-console-f2)
+- [The operations / POS console (F3)](#the-operations--pos-console-f3)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -1041,6 +1042,30 @@ The catalogue and pricing pages, their SQL, the COPY import and the live preview
 Every list is a keyset page on `(created_at, id)` (default 50, maximum 100); RLS is enforced from
 the token's `org_id` on every route, and a body naming another org is refused with 403.
 
+## The operations / POS console (F3)
+
+F3 completes the point-of-sale and operations console. It is additive: it changes no core table or
+function and re-implements no existing path (ADR-0070). The POS till (R3), the shift/Z-report,
+layby, return and stocktake backends (R5) and the admin operations pages (A3) already exist; F3 adds:
+
+- **Cart persistence.** The till's Zustand cart now uses the `persist` middleware, so the lines,
+  tenders, parked (held) carts and the ZWG rate survive a page reload. Money is stored as its
+  decimal string form and revived as a `Decimal` on rehydrate (`src/verticals/pos/cart.ts`), so no
+  price ever passes through a JS number. The store is built by `createCartStore(storage?)`, so a test
+  can drive the persist/revive round-trip without a browser; the page uses the default binding.
+- **A dedicated `/admin/z-reports` page** with `ZReport58mm.tsx` — a slip exactly 58 mm wide
+  (`@page { width: 58mm }`, printed through `window.print`). It lists the branch's immutable
+  Z-reports as a keyset page and shows one report's totals by method and currency, its VAT-by-rate
+  breakdown and its sale/void counts. The read is `app.admin_z_report` by primary key (ADR-0064), a
+  single indexed lookup regardless of how many `pos_sales` rows exist.
+- **A stocktake progress bar** on `/admin/stocktake`, counting how many snapshot lines the operator
+  has explicitly entered (`stocktakeProgress` / `stocktakeLineKey` in `src/verticals/admin/ops.ts`).
+
+The `/admin/shifts` page keeps its inline read-only Z-report and is still reachable from the nav as
+"Shifts & Z-reports"; the new page is "Z-report slips". Everything else the F3 brief lists — the
+keyboard-only sale, the split USD+ZWG tender, the 58 mm receipt, the layby/return/credit-limit pages
+and the set-based stocktake import — already exists and is covered by R3/R5/H4/A3 tests.
+
 ## Adding a vertical module
 
 A vertical (Retail, Pharmacy, Hardware, School) sits on top of the core. It never edits a core
@@ -1113,15 +1138,18 @@ scan. Output is written to `docs/perf/`. The run records timings and does not fa
 | 108–111 | A3: admin operations UI (laybys, returns, shifts & Z-reports, stocktake) | `tests/admin-a3.test.ts` |
 | 112–118 | F1: frontend shell and sign-in (email/password, `/api/auth/me`, app shell) | `tests/frontend-f1.test.ts` |
 | 119–121 | F2: admin products / pricing / promotions console | `tests/frontend-f2.test.ts` |
+| 122–127 | F3: operations, Z-report, receipt and stocktake UI | `tests/operations-f3.test.ts` |
 
 H1's tests are numbered 49–51 because R4 already owns 14–18 and R5 owns 19–24; the H1 brief called
 them 16–18. H2 continues from 52 (ADR-0033) and H3 from 63 (ADR-0038). ADR-0026, ADR-0033 and
-ADR-0038 record the mappings. F2 continues from F1's 118 (ADR-0069); the F2 brief called its tests
-43–45, but those are Phase 1 retail tests.
+ADR-0038 record the mappings. F2 continues from F1's 118 (ADR-0069); F3 continues from F2's 121
+(ADR-0070). The F2 brief called its tests 43–45 and the F3 brief called its tests 46–51; those numbers
+are already taken by Phase 1 retail (R1/R2) and branch (H1) tests.
 
 Test 13 is the keyboard-only Playwright run and test 14 is the offline reload-and-reconnect run;
 both live in `e2e/`. The admin consoles also carry navigation specs (`e2e/admin-ops.e2e.ts` for A3,
-`e2e/admin-products-pricing.e2e.ts` for F2) that walk the real UI. The e2e config starts its own dev
+`e2e/admin-products-pricing.e2e.ts` for F2, `e2e/operations-f3.e2e.ts` for F3) that walk the real UI.
+The e2e config starts its own dev
 server on port 12100 with its own dist dir (`.next-e2e`), so it never clashes with a running
 `npm run dev` and `npm run build` cannot clobber it:
 

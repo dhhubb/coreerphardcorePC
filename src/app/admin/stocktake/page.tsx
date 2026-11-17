@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { adminGet, adminPost, withCursor } from '@/verticals/admin/client';
+import { stocktakeProgress, stocktakeLineKey } from '@/verticals/admin/ops';
 import { OpsNav } from '@/verticals/admin/OpsNav';
 
 /**
@@ -54,9 +55,17 @@ export default function StocktakePage() {
   const [warehouseId, setWarehouseId] = useState('');
   const [snapshot, setSnapshot] = useState<SnapshotItem[]>([]);
   const [counted, setCounted] = useState<Record<string, string>>({});
+  const [touched, setTouched] = useState<Record<string, true>>({});
   const [activeCount, setActiveCount] = useState<{ id: string; createdAt: string; countNo: string } | null>(
     null,
   );
+
+  // Progress: the share of snapshot lines the operator has explicitly entered. The snapshot
+  // prefills every line with the system figure, so "counted" means the counter has visited the line,
+  // not merely that a number is present.
+  const totalLines = snapshot.length;
+  const countedLines = Object.keys(touched).length;
+  const progressPercent = stocktakeProgress(totalLines, countedLines);
 
   const loadFirstPage = useCallback(async () => {
     setLoading(true);
@@ -107,9 +116,10 @@ export default function StocktakePage() {
       setSnapshot(snap.items);
       setCounted(
         Object.fromEntries(
-          snap.items.map((item) => [keyOf(item), item.system_qty]),
+          snap.items.map((item) => [stocktakeLineKey(item), item.system_qty]),
         ),
       );
+      setTouched({});
       await loadFirstPage();
     } catch (err) {
       setError((err as Error).message);
@@ -124,7 +134,7 @@ export default function StocktakePage() {
       const lines = snapshot.map((item) => ({
         product_id: item.product_id,
         variant_id: item.variant_id,
-        counted_qty: counted[keyOf(item)] ?? item.system_qty,
+        counted_qty: counted[stocktakeLineKey(item)] ?? item.system_qty,
         system_qty: item.system_qty,
         unit_cost: item.unit_cost,
       }));
@@ -144,6 +154,7 @@ export default function StocktakePage() {
       setActiveCount(null);
       setSnapshot([]);
       setCounted({});
+      setTouched({});
       await loadFirstPage();
     } catch (err) {
       setError((err as Error).message);
@@ -187,6 +198,34 @@ export default function StocktakePage() {
             <p data-testid="active-count">
               Counting {activeCount.countNo}. Edit any quantity that differs from the system figure.
             </p>
+            <div
+              data-testid="count-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressPercent}
+              aria-label="Stocktake progress"
+              style={{
+                height: 10,
+                borderRadius: 5,
+                background: '#e5e7eb',
+                overflow: 'hidden',
+                margin: '8px 0',
+              }}
+            >
+              <div
+                data-testid="count-progress-bar"
+                style={{
+                  width: `${progressPercent}%`,
+                  height: '100%',
+                  background: '#2f855a',
+                  transition: 'width 120ms ease',
+                }}
+              />
+            </div>
+            <p data-testid="count-progress-label">
+              {countedLines} of {totalLines} line(s) counted ({progressPercent}%)
+            </p>
             <table
               data-testid="count-lines"
               style={{ borderCollapse: 'collapse', width: '100%', marginTop: 12 }}
@@ -201,7 +240,7 @@ export default function StocktakePage() {
               </thead>
               <tbody>
                 {snapshot.map((item) => (
-                  <tr key={keyOf(item)}>
+                  <tr key={stocktakeLineKey(item)}>
                     <td>
                       <code>{item.variant_id ?? item.product_id}</code>
                     </td>
@@ -209,11 +248,13 @@ export default function StocktakePage() {
                     <td align="right">{item.unit_cost}</td>
                     <td align="right">
                       <input
-                        aria-label={`Counted qty ${keyOf(item)}`}
-                        value={counted[keyOf(item)] ?? ''}
-                        onChange={(event) =>
-                          setCounted((current) => ({ ...current, [keyOf(item)]: event.target.value }))
-                        }
+                        aria-label={`Counted qty ${stocktakeLineKey(item)}`}
+                        value={counted[stocktakeLineKey(item)] ?? ''}
+                        onChange={(event) => {
+                          const key = stocktakeLineKey(item);
+                          setCounted((current) => ({ ...current, [key]: event.target.value }));
+                          setTouched((current) => ({ ...current, [key]: true }));
+                        }}
                         style={{ width: 90, textAlign: 'right' }}
                       />
                     </td>
@@ -273,6 +314,3 @@ export default function StocktakePage() {
   );
 }
 
-function keyOf(item: { product_id: string; variant_id: string | null }): string {
-  return `${item.product_id}:${item.variant_id ?? ''}`;
-}

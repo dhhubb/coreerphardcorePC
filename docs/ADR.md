@@ -1450,3 +1450,89 @@ when the cache entry is fresh, with `EXPLAIN` showing `get_price` reaches `price
 `app.get_price`), the brief's endpoint exists without duplicating the COPY import, and the test
 numbering continues without collisions. The cost is a deliberately small diff: F2 adds UI and one
 route, and records that the rest was already built rather than pretending to rebuild it.
+
+## ADR-0070 — F3 completes the operations/POS console; its tests are 122–127
+
+**Context.** The F3 brief asks for four things: (1) a final polish of `/pos` (keyboard shortcuts, a
+keyboard-only three-action sale, split USD+ZWG tender, and the 58mm receipt), (2) `/admin/shifts` and
+a `/admin/z-reports` page whose report prints at 58mm and reads under 100 ms with a million
+`pos_sales`, (3) `/admin/laybys`, `/admin/returns` and credit limits, and (4) `/admin/stocktake` with
+a COPY import and a progress bar.
+
+The repository already contains almost all of this backend and most of this UI:
+
+* **R3** built `shifts`, `pos_sales` (partitioned, PK `(id, created_at)`), `pos_payments` (one row per
+  tender), `app.post_pos_sale` (CORE invoice + one CORE payment per tender in one transaction) and the
+  keyboard-only `/pos` till with `F2`/`F3`/`F4`/`F9`/`F10`, tested as R3 9–13.
+* **R5** built `laybys`, `layby_reservations`, `returns`, `return_lines`, `credit_limits`, `z_reports`
+  (immutable) and `stock_counts`/`stock_count_items`, plus `app.post_balanced_journal`, `check_credit`
+  (locks the contact `FOR UPDATE`), `create_layby`/`complete_layby`/`cancel_layby`, `create_return`
+  (locks the invoice lines), `close_shift` and `create_stock_count`/`close_stock_count`, tested as R5
+  19–24.
+* **H4** built `Receipt58mm.tsx` (exactly 58 mm, `@page { width: 58mm }`), the shared `receiptData`
+  model, and the scanner/shortcut state machines, tested as H4 69–74 plus the H4 e2e.
+* **A3** built `/admin/laybys`, `/admin/returns`, `/admin/shifts` (with an inline read-only Z-report)
+  and `/admin/stocktake`, tested as A3 108–111.
+
+So F3 is not a green field: it is the completion of a surface that already exists. The brief also
+numbers its tests 46–51, but 46–48 are R2 tests and 49–52 are H1 tests. ADR-0010 forbids renumbering:
+a new run continues from the highest number actually present, which after F2 is 121.
+
+**Decision.** F3 is delivered as an additive completion slice. It changes no core table or core
+function and re-implements no existing path:
+
+* **Cart persistence.** The Zustand cart gains the `persist` middleware the brief names, so the lines,
+  tenders, parked (held) carts and the ZWG rate survive a page reload. `Decimal` money is serialised
+  as its string form and revived on rehydrate, so no price ever passes through a JS number.
+* **A dedicated `/admin/z-reports` page** with a `ZReport58mm.tsx` component (exactly 58 mm,
+  `@page { width: 58mm }`, printed through `window.print`). It lists the branch's immutable Z-reports
+  as a keyset page and shows one report's totals by method and currency, its VAT-by-rate breakdown and
+  its sale/void counts. The read is `app.admin_z_report` by primary key (ADR-0064), so it is a single
+  indexed lookup regardless of how many `pos_sales` rows exist.
+* **A progress bar** on `/admin/stocktake`, counting how many snapshot lines carry a typed count.
+* Everything else the brief lists already exists and is covered by R3/R5/H4/A3; F3 does not rewrite
+  it.
+
+F3 owns tests **122–127** in `tests/operations-f3.test.ts`. The brief's six tests are 46–51; they
+are renumbered to 122–127 (ADR-0010). They cover F3's genuinely new surface — the persisted cart, the
+dedicated Z-report page's reads, the stocktake progress inputs, and the 58mm slip — and they
+deliberately drive the **real route handlers with a real access token** rather than the `app.*`
+functions directly, so they exercise the full frontend-complete path:
+
+* **122** the cart store persists lines, tenders, parked carts and the ZWG rate across a reload, and
+  revives `Decimal` money (never a JS number).
+* **123** `/api/z-reports` returns a keyset page of immutable Z-reports and `/api/admin/z-reports/:id`
+  reads one by primary key; the Z-report 58mm slip renders its totals, VAT bands and counts.
+* **124** the stocktake snapshot and its progress inputs: opening a count returns every line, and the
+  console's counted-share arithmetic tracks the lines the counter has entered, before closing to one
+  balanced journal.
+* **125** a USD+ZWG split tender through `POST /api/pos/sales` writes two `pos_payments` rows and two
+  CORE payments, and the invoice is fully paid.
+* **126** the keyboard flow: the till's shortcut map (scan / hold / pay) plus the exact-cash sale
+  (scan, F9, Enter) committing through the route with no change given. The browser-level keyboard-only
+  e2e already exists as R3 test 13 (`e2e/pos-keyboard.e2e.ts`), so F3 does not duplicate it.
+* **127** the branch-scoped Z-report list returns nothing to another branch's token, and the list
+  route refuses a `limit` above 100.
+
+**Consequence.** The POS and operations console is complete and consistent with the till (the console
+and the page both read the same immutable ledger), the brief's Z-report page exists without
+duplicating the A3 shift page, and the test numbering continues without collisions. The cost is a
+deliberately small diff: F3 adds cart persistence, one page and one component, a progress bar, and
+records that the rest was already built rather than pretending to rebuild it.
+
+F3 does not re-assert R3's concurrency results (tests 10 and 12 already prove 50 concurrent sales
+never oversell and 100 concurrent sales finish without deadlock), R3's keyboard e2e (test 13), or
+R5's layby/return/credit-limit results (tests 19–24). Re-running them under a new number would be
+filler, which the brief forbids.
+
+**Note on the stocktake import.** The brief says "Import via COPY not loop". COPY FROM is not
+permitted under row-level security (`0A000`), which ADR-0063 already records, so the admin path uses
+`app.admin_import_stock_count_lines`, a **set-based** insert of the whole line array in one statement
+— not a row-by-row loop. The intent (one set operation, not N round trips) is met; the mechanism is
+set-based SQL because COPY is unavailable on a path that must stay under RLS.
+
+**Note on the credit index.** The brief asks for an index `(org_id, contact_id, status)`. `invoices`
+has no `status` column; "open" is `total > amount_paid`. R5 added `invoices_org_contact_created_idx
+(org_id, contact_id, created_at DESC, id DESC)`, and Phase 1 already had the partial
+`invoices_open_idx (org_id, contact_id) WHERE total > amount_paid`. Together they index exactly the
+open-balance sum `check_credit` runs, so no new index is added.

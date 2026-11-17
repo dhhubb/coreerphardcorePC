@@ -539,3 +539,20 @@ export async function importStockCountLines(
 export function formatMoney(value: Decimal | string): string {
   return money(value).toFixed(4);
 }
+
+/**
+ * The stocktake progress, as a whole-number percentage (F3).
+ *
+ * The snapshot prefills every line with the system figure, so "counted" means the counter has
+ * visited the line — not merely that a number is present. `touched` is the set of line keys the
+ * operator has edited; the share is those over the snapshot's line count.
+ */
+export function stocktakeProgress(lineCount: number, touchedCount: number): number {
+  if (lineCount <= 0) return 0;
+  return Math.round((touchedCount / lineCount) * 100);
+}
+
+/** The stable key for a snapshot line, used to track which lines the counter has entered. */
+export function stocktakeLineKey(item: { product_id: string; variant_id: string | null }): string {
+  return `${item.product_id}:${item.variant_id ?? ''}`;
+}

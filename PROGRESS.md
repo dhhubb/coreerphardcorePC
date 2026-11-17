@@ -1693,3 +1693,97 @@ $ npm run test:e2e
   window is re-checked at evaluation time (test 121).
 * **No test is mocked.** The F2 tests call the real route handlers with a real access token, against
   the real local Postgres and the real local Redis. The e2e spec drives the real UI in a browser.
+
+## F3 — Operations, Z-report, receipt and stocktake UI
+
+F3 is a UI-completion slice over the point-of-sale and operations surface that already exists. R3
+built the keyboard-only `/pos` till, shifts, `pos_sales`/`pos_payments` and `app.post_pos_sale`; R5
+built the shift/Z-report, layby, return, credit-limit and stocktake backends; H4 built the 58 mm
+receipt, the shared receipt model and the scanner/shortcut state machines; A3 built the admin
+operations pages. F3 completes that surface with the pieces the brief names that were left out, and
+adds the dedicated Z-report page — additively, changing no core table or function (ADR-0070).
+
+### What was built
+
+* **Cart persistence** (`src/verticals/pos/cart.ts`): the till's Zustand cart now uses the `persist`
+  middleware, so the lines, tenders, parked (held) carts and the ZWG rate survive a page reload.
+  Money is serialised as its decimal string form and revived as a `Decimal` on rehydrate, so no price
+  ever passes through a JS number. The transient flags (status, error, receipt) are excluded by
+  `partialize`. The store is created by `createCartStore(storage?)`; the page uses the default
+  binding (`localStorage` in the browser, a no-op storage on the server), and a test injects an
+  in-memory storage to drive the round-trip.
+* **A dedicated `/admin/z-reports` page** (`src/app/admin/z-reports/page.tsx`) with
+  `src/verticals/pos/ZReport58mm.tsx` and `src/verticals/pos/zReportData.ts`. The slip is exactly
+  58 mm wide (`@page { width: 58mm }`, printed through `window.print`, the same browser path the
+  receipt uses). The page lists the branch's immutable Z-reports as a keyset page on
+  `(created_at, id)` and shows one report's totals by method and currency, its VAT-by-rate breakdown
+  and its sale/void counts. The read is `app.admin_z_report` by primary key (ADR-0064), a single
+  indexed lookup regardless of how many `pos_sales` rows exist. The operations nav gains a
+  "Z-report slips" link; `/admin/shifts` keeps its inline read-only Z-report and the "Shifts &
+  Z-reports" label.
+* **A stocktake progress bar** (`src/app/admin/stocktake/page.tsx`): `stocktakeProgress` and
+  `stocktakeLineKey` (`src/verticals/admin/ops.ts`) count the share of snapshot lines the operator
+  has explicitly entered — the snapshot prefills every line, so "counted" means the counter visited
+  the line, not merely that a number is present. The bar resets when a count is opened or closed.
+* Everything else the brief lists already exists and is covered by R3/R5/H4/A3; F3 does not rewrite
+  it.
+
+### The F3 tests (`tests/operations-f3.test.ts`)
+
+| # | Test |
+| --- | --- |
+| 122 | The cart store persists lines, tenders, parked carts and the ZWG rate across a reload, and revives money as `Decimal` |
+| 123 | `/api/z-reports` returns a keyset page of immutable Z-reports and `/api/admin/z-reports/:id` reads one by key; the 58 mm slip renders its totals |
+| 124 | The stocktake snapshot returns every line and the console's progress arithmetic tracks the entered lines, closing to one balanced journal |
+| 125 | A USD+ZWG split tender through `POST /api/pos/sales` writes two `pos_payments` rows and two CORE payments, fully paid |
+| 126 | The keyboard flow: the shortcut map plus the exact-cash sale committing through the route with no change given |
+| 127 | The Z-report list is branch-scoped and refuses a `limit` above 100 |
+
+The brief numbered these 46–51, but 46–48 are R2 tests and 49–52 are H1 tests. ADR-0010 forbids
+renumbering: a new run continues from the highest number actually present, which after F2 is 121.
+See ADR-0070.
+
+The F3 e2e (`e2e/operations-f3.e2e.ts`) drives the real UI: it closes a shift, walks
+`/admin/z-reports`, opens the 58 mm slip and asserts its totals and width, then opens a stock count
+and asserts the progress bar tracks the entered line. It is a navigation/smoke test, not one of the
+numbered Vitest tests.
+
+### Gate
+
+```
+$ npx supabase db reset
+Finished supabase db reset on branch master.   (all migrations apply to an empty DB)
+
+$ npm test
+ Test Files  26 passed (26)
+      Tests  188 passed (188)
+
+$ npm run build
+✓ Compiled successfully   (incl. the new /admin/z-reports page and its 58mm slip)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+
+$ npm run test:e2e
+7 passed (38.2s)   (incl. the new F3 Z-report / stocktake spec)
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0070); the tenant invariant checks still
+  return zero rows, and `z_reports` remains immutable.
+* **The console and the till cannot drift.** The Z-report page renders exactly the immutable
+  `z_reports` row the shift close wrote, and the stocktake progress uses the same snapshot the
+  console imports.
+* **Money never becomes a number.** The cart persists decimals as strings and revives them as
+  `Decimal`; the slip builds its totals as `Decimal` from the route's fixed-scale strings.
+* **No test is mocked.** The F3 tests call the real route handlers with a real access token, against
+  the real local Postgres; the e2e spec drives the real UI in a browser. The cart test uses an
+  in-memory `StateStorage` (a real storage implementation, not a stub of the store) because Node has
+  no `localStorage`.

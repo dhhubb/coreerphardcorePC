@@ -221,6 +221,7 @@ inventory). A3 (admin operations UI) owns 108–111 (`tests/admin-a3.test.ts`, A
 called them 32–35, but those are taken by Phase 1 sales). F1 (frontend shell + sign-in) owns 112–118
 (`tests/frontend-f1.test.ts`, ADR-0066). F2 (admin products / pricing / promotions console) owns
 119–121 (`tests/frontend-f2.test.ts`, ADR-0069; the F2 brief called them 43–45, but those are taken
-by R1/R2). A new
+by R1/R2). F3 (operations / POS console completion) owns 122–127 (`tests/operations-f3.test.ts`,
+ADR-0070; the F3 brief called them 46–51, but those are taken by R2/H1). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).
