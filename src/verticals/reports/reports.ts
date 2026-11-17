@@ -10,6 +10,7 @@ import type {
   ProductProfitPage,
   ProductProfitRow,
   ProductRankPage,
+  TodayFigures,
   VatRow,
   ZReportPage,
   ZReportRow,
@@ -240,7 +241,10 @@ export async function lastSync(
     'select app.report_last_sync($1, $2) as r',
     [input.orgId, input.branchId],
   );
-  const row = result.rows[0]!.r;
+  return lastSyncFrom(result.rows[0]!.r);
+}
+
+function lastSyncFrom(row: Record<string, unknown>): LastSync {
   const contact = row['last_cloud_contact_at'];
   const ingest = row['last_ingest_at'];
   return {
@@ -248,5 +252,113 @@ export async function lastSync(
     lastIngestAt: ingest === null || ingest === undefined ? null : String(ingest),
     lastPushedSeq: String(row['last_pushed_seq'] ?? '0'),
     outboxSize: Number(row['outbox_size'] ?? 0),
+  };
+}
+
+/**
+ * "Last sync: 2 min ago", from the timestamp the console holds. A null timestamp is "never", and a
+ * future or clock-skewed one is "just now" rather than a negative age. Kept here (not in the page) so
+ * the branch and the cloud label a stale figure the same way (ADR-0049, ADR-0076).
+ */
+export function syncAgeLabel(
+  lastSyncAt: string | null,
+  now: Date = new Date(),
+): string {
+  if (!lastSyncAt) return 'Last sync: never';
+  const at = new Date(lastSyncAt).getTime();
+  if (!Number.isFinite(at)) return 'Last sync: never';
+  const seconds = Math.floor((now.getTime() - at) / 1000);
+  if (seconds <= 5) return 'Last sync: just now';
+  if (seconds < 60) return `Last sync: ${seconds} sec ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Last sync: ${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Last sync: ${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  return `Last sync: ${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+/** Today's live figures for the /reports/today dashboard (ADR-0076). */
+export async function todayFigures(
+  client: PoolClient,
+  input: { orgId: string; branchId: string },
+): Promise<TodayFigures> {
+  const result = await client.query<{ r: Record<string, unknown> }>(
+    'select app.report_today($1, $2) as r',
+    [input.orgId, input.branchId],
+  );
+  const row = result.rows[0]!.r;
+  const list = (value: unknown): Record<string, unknown>[] =>
+    Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+  return {
+    byCurrency: decimalRecord(row['by_currency']),
+    salesBase: moneyFromSql(num(row['sales_base'])),
+    saleCount: Number(row['sale_count'] ?? 0),
+    grossSales: moneyFromSql(num(row['gross_sales'])),
+    byTill: list(row['by_till']).map((t) => ({
+      tillId: String(t['till_id']),
+      saleCount: Number(t['sale_count'] ?? 0),
+      gross: moneyFromSql(num(t['gross'])),
+    })),
+    byBranch: list(row['by_branch']).map((b) => ({
+      branchId: String(b['branch_id']),
+      saleCount: Number(b['sale_count'] ?? 0),
+      gross: moneyFromSql(num(b['gross'])),
+    })),
+    lowStock: list(row['low_stock']).map((l) => ({
+      productId: String(l['product_id']),
+      variantId: l['variant_id'] === null || l['variant_id'] === undefined ? null : String(l['variant_id']),
+      sku: String(l['sku'] ?? ''),
+      name: String(l['name'] ?? ''),
+      qty: moneyFromSql(num(l['qty'])),
+    })),
+    laybysDue: list(row['laybys_due']).map((l) => ({
+      id: String(l['id']),
+      laybyNo: String(l['layby_no']),
+      dueDate: String(l['due_date']),
+      total: moneyFromSql(num(l['total'])),
+      depositPaid: moneyFromSql(num(l['deposit_paid'])),
+      customer: String(l['customer'] ?? ''),
+    })),
+    fiscal: (() => {
+      const f = (row['fiscal'] ?? {}) as Record<string, unknown>;
+      return {
+        pending: Number(f['pending'] ?? 0),
+        sent: Number(f['sent'] ?? 0),
+        failed: Number(f['failed'] ?? 0),
+        failedAmount: moneyFromSql(num(f['failed_amount'])),
+      };
+    })(),
+    sync: lastSyncFrom((row['sync'] ?? {}) as Record<string, unknown>),
+  };
+}
+
+/** One Z-report by primary key, with the same fiscal totals the list carries (ADR-0047, ADR-0076). */
+export async function zReportDetail(
+  client: PoolClient,
+  input: { orgId: string; branchId: string; zReportId: string },
+): Promise<ZReportRow | null> {
+  const result = await client.query<{ r: Record<string, unknown> | null }>(
+    'select app.report_z_report_detail($1, $2, $3) as r',
+    [input.orgId, input.branchId, input.zReportId],
+  );
+  const row = result.rows[0]!.r;
+  if (row === null || row === undefined) return null;
+  return {
+    id: String(row['id']),
+    zNo: String(row['z_no']),
+    shiftId: String(row['shift_id']),
+    openedAt: String(row['opened_at']),
+    closedAt: String(row['closed_at']),
+    openingFloat: moneyFromSql(num(row['opening_float'])),
+    saleCount: Number(row['sale_count'] ?? 0),
+    voidCount: Number(row['void_count'] ?? 0),
+    grossSales: moneyFromSql(num(row['gross_sales'])),
+    taxTotal: moneyFromSql(num(row['tax_total'])),
+    byMethod: decimalRecord(row['by_method']),
+    byCurrency: decimalRecord(row['by_currency']),
+    vatByRate: decimalRecord(row['vat_by_rate']),
+    fiscal: fiscalStatus(row['fiscal']),
+    createdAt: String(row['created_at']),
   };
 }

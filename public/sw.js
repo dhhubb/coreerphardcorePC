@@ -14,13 +14,18 @@
  *     renders the till.
  */
 
-const CACHE = 'erp-branch-v2';
+const CACHE = 'erp-branch-v3';
 const SHELL = [
   '/',
   '/pos',
   '/login',
   '/admin/products',
   '/admin/z-reports',
+  '/reports',
+  '/reports/today',
+  '/reports/profit',
+  '/reports/vat',
+  '/reports/z',
   '/manifest.webmanifest',
   '/icon.svg',
 ];
@@ -61,6 +66,7 @@ function isShellAsset(url) {
     url.pathname.startsWith('/pos/') ||
     url.pathname === '/login' ||
     url.pathname.startsWith('/admin') ||
+    url.pathname.startsWith('/reports') ||
     url.pathname === '/manifest.webmanifest' ||
     url.pathname === '/icon.svg'
   );

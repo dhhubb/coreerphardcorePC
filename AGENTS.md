@@ -188,6 +188,12 @@ psql "$DATABASE_URL" -f scripts/check-tenant-tables.sql  # must be 0 rows
 * **Do not store what changes after an immutable write.** A Z-report row is immutable, but its
   invoices' fiscal status changes after the close, so the report computes sent / pending / failed at
   read time instead of storing them (ADR-0047).
+* **The live dashboard reads today, not the facts.** `app.report_today` bounds every figure at
+  `created_at >= current_date` on `pos_sales` / `pos_payments`, so it uses the branch's
+  `(org_id, branch_id, created_at DESC)` index and never a materialised view. The cloud owner
+  console (`/cloud/reports`) reads the same `/api/reports/*` endpoints through the same client as
+  the branch, so the two cannot drift, and it always shows "Last sync: …" (`syncAgeLabel`) so a
+  stale figure is explained (ADR-0049, ADR-0076).
 * **Money and reads.** All report money is `Decimal` in TS and NUMERIC(19,4) in PG; use
   `moneyFromSql`/`money` at the boundary, never a JS number.
 * **The login path has no user, so it runs as `anon`.** `src/core/login.ts` sets
@@ -267,6 +273,8 @@ them 16–18, but those are taken by R4/H1). F5 (sync engine completion) owns 13
 own numbers 1–25 collide with the tenancy and accounting tests). F7 (hardware and receipts
 completion) owns 141–145 (`tests/hardware-f7.test.ts`, ADR-0074; the F7 brief's own numbers collide
 with the core tests). F8 (migration wizard completion) owns 146–150 (`tests/import-f8.test.ts`,
-ADR-0075; the F8 brief's own numbers collide with the core tests). A new
+ADR-0075; the F8 brief's own numbers collide with the core tests). F9 (reports and owner console
+completion) owns 151–160 (`tests/reports-f9.test.ts`, ADR-0076; the F9 brief's own numbers collide
+with the core tests). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).

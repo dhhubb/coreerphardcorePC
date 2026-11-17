@@ -85,3 +85,58 @@ export interface LastSync {
   lastPushedSeq: string;
   outboxSize: number;
 }
+
+/** A row of the low-stock alert: on-hand below the threshold. */
+export interface LowStockRow {
+  productId: string;
+  variantId: string | null;
+  sku: string;
+  name: string;
+  qty: Decimal;
+}
+
+/** A layby that has reached its due date and is still open. */
+export interface LaybyDueRow {
+  id: string;
+  laybyNo: string;
+  dueDate: string;
+  total: Decimal;
+  depositPaid: Decimal;
+  customer: string;
+}
+
+/** Today's sales for one till. */
+export interface TillSalesRow {
+  tillId: string;
+  saleCount: number;
+  gross: Decimal;
+}
+
+/** Today's sales for one branch (the owner console rolls the group up). */
+export interface BranchSalesRow {
+  branchId: string;
+  saleCount: number;
+  gross: Decimal;
+}
+
+/** The fiscal queue as of today: how many invoices are in each state. */
+export interface TodayFiscal {
+  pending: number;
+  sent: number;
+  failed: number;
+  failedAmount: Decimal;
+}
+
+/** The live dashboard for /reports/today. Every figure is today's. */
+export interface TodayFigures {
+  byCurrency: Record<string, Decimal>;
+  salesBase: Decimal;
+  saleCount: number;
+  grossSales: Decimal;
+  byTill: TillSalesRow[];
+  byBranch: BranchSalesRow[];
+  lowStock: LowStockRow[];
+  laybysDue: LaybyDueRow[];
+  fiscal: TodayFiscal;
+  sync: LastSync;
+}

@@ -1974,3 +1974,93 @@ access token against the real local Postgres, and the component test renders wit
 
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file; F8 builds neither.
+
+## ADR-0076 — F9 completes reports and the owner console (H6); its tests are 151–160
+
+**Context.** The F9 brief ("H6 (now F9): Reports and owner console completion", the final run) asks
+for the reports surface to be finished: an append-only `daily_product_sales` fact table written at
+shift close from the sale lines and their COGS, no materialised views, today's figures read live
+from `pos_sales` / `pos_payments` bounded by a today index `(org_id, branch_id, created_at DESC)`,
+closed days read from `daily_product_sales`, the profit / VAT / Z-report pages, and an owner console
+that reaches the same pages from the cloud. H6 already shipped the bulk of this (ADR-0045,
+ADR-0046, ADR-0047, ADR-0048): the `daily_product_sales` table (append-only, written by
+`app.record_shift_daily_facts` inside `app.close_shift`), `app.report_profit_by_product`,
+`app.report_product_ranking` / `report_best_sellers` / `report_slow_movers`, `app.report_vat`,
+`app.report_z_reports`, `app.report_gl_period_profit`, `app.report_last_sync`, the
+`/api/reports/profit`, `/api/reports/vat` and `/api/reports/z-reports` routes, the `/reports` page
+and tests **86–95**. F9 closes the parts of the brief H6 left out, additively (ADR-0065: core tables
+and functions are untouched). As with F2–F8, a completion slice adds one ADR and continues the test
+numbering from the highest number actually present (ADR-0010): after F8's 150, F9 owns **151–160**.
+
+**The gaps F9 closes.**
+
+1. **The live dashboard.** `app.report_today(org_id, branch_id)` (SQL, `security invoker`, `stable`)
+   returns today's figures in one call: the takings by currency (`USD` / `ZWG`, summed from
+   `pos_payments.amount_applied`), the same takings converted to base (USD, `pos_payments.base_amount`),
+   the sale count and the gross (`invoices.subtotal`) from `pos_sales`, the sales by till and by
+   branch, the low-stock list (on-hand below five, from `stock_balances`), the laybys that are open
+   and have reached their due date, the fiscal queue (`fiscal_invoices` by state, with the failed
+   amount) and the sync status (reusing `app.report_last_sync`). Everything is bounded by
+   `created_at >= current_date`, so it reads the branch's `(org_id, branch_id, created_at DESC)`
+   index (ADR-0046) and never a materialised view.
+2. **The Z-report detail.** `app.report_z_report_detail(org_id, branch_id, z_report_id)` returns one
+   Z-report by primary key with the fiscal totals computed at read time (ADR-0047), the VAT-by-rate
+   split and the sale / void counts, so the detail page is a single indexed lookup however many
+   Z-reports exist.
+3. **The routes.** `GET /api/reports/today` and `GET /api/reports/z-reports/:id`, thin handlers over
+   the two functions, scoping the branch through the existing `resolveBranchId` (an explicit
+   `branch_id` is allowed only when the token scopes it, else 403; an unknown Z-report is 404).
+4. **The pages and the console.** `/reports/today`, `/reports/profit` (profit / best-sellers /
+   slow-movers over one period, keyset-paged), `/reports/vat` (the ZIMRA return, by rate),
+   `/reports/z` (the keyset list) and `/reports/z/[id]` (the detail with a 58mm print). A shared
+   `ReportsNav` links them, and `/cloud/reports` is the owner console: it reads the same endpoints
+   through the same client, so the branch and the cloud show the same figures and cannot drift
+   (ADR-0049), and it always shows "Last sync: …" so a stale figure is explained. `syncAgeLabel`
+   (in `reports.ts`, unit-tested) is shared by both consoles.
+5. **Offline.** The report pages join the service-worker app shell, so the console opens with the
+   network cut and prints from an already-fetched immutable Z-report.
+
+**The brief's column names versus H6's.** The brief lists the fact columns as
+`(org_id, branch_id, product_id, variant_id, date, qty_sold, revenue_base, cogs, profit)`. H6
+shipped the same table with `business_date`, `qty`, `gross`, `tax`, `cogs`, `currency` (and
+`shift_id` / `z_report_id`), which is what `app.close_shift` writes and what tests 86–95 read. F9
+does not rename a stored, append-only column: `profit` is not stored, it is `gross - cogs` and is
+computed in the report functions (the profit report already equals the GL, ADR-0045). Renaming
+would edit an H6 migration, which the additive rule forbids.
+
+**Today is live; a closed day is a fact.** The two sources never overlap (ADR-0046). `report_today`
+reads `pos_sales` / `pos_payments` for today only; the profit / VAT / ranking reports read
+`daily_product_sales` for a closed day and the live tables for today. Test 152 pins this: a sale row
+dated yesterday and a closed-day fact are both excluded from today's figures.
+
+**The 1M-fact perf check.** Over 1,000,000 `daily_product_sales` rows seeded with `generate_series`
+inside one SQL statement, a one-year `app.report_profit_by_product` page runs in ~10 ms warm
+(39 ms cold) and uses the product index, well under the 150 ms the slice targets. The Phase 2
+`docs/perf/` trial-balance run (journal lines) is unchanged and still the perf command.
+
+**Consequence.** The reports surface is complete on a request path: the live dashboard, the Z-report
+detail and the owner console, all reading one set of SQL functions. No core table or function is
+edited; F9 adds two read-only `security invoker` functions and their grants, two routes, five pages,
+a nav, a client and the shared label helper.
+
+**Test numbering.** F9 owns **151–160**, continuing from F8's 150.
+
+| F9 test | Test |
+| --- | --- |
+| 151 | `report_today` shows today's takings by currency and by till, and the base total |
+| 152 | Today is read live; a closed-day fact and a yesterday sale are not counted |
+| 153 | `report_today` lists low stock (on-hand below five) and nothing above it |
+| 154 | `report_today` lists only open laybys that have reached their due date |
+| 155 | `report_today` counts the fiscal queue by state and sums the failed amount |
+| 156 | `report_today` carries the same sync status as `report_last_sync` |
+| 157 | A Z-report detail carries the same fiscal totals the list carries |
+| 158 | A Z-report detail for an unknown id is not found |
+| 159 | The today and Z-report detail routes answer with a real token and scope the branch |
+| 160 | `report_today` reads today through the branch index |
+
+All ten are Vitest tests in `tests/reports-f9.test.ts`, so `npm test` shows them (the brief's stop
+rule: a test counts only when `npm test` reports it). They call the real SQL functions and the real
+route handlers with a real access token against the real local Postgres; nothing is mocked.
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file; F9 builds neither.

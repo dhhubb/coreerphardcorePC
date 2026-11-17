@@ -2,6 +2,7 @@
 
 import { getToken } from '@/core/session';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ReportsNav } from '@/verticals/reports/ReportsNav';
 
 /**
  * The reports page (/reports) — the owner console and the branch view in one.
@@ -189,6 +190,7 @@ export default function ReportsPage() {
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui, sans-serif' }}>
       <h1>Reports</h1>
+      <ReportsNav current="/reports" />
 
       <p data-testid="last-sync">
         {sync?.last_ingest_at

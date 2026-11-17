@@ -41,6 +41,7 @@ tests 112–118.
 | F6 | Fiscal and numbering (H3) completion | tests 136–140 | DONE |
 | F7 | Hardware and receipts (H4) completion: scanner hook, camera, IndexedDB holds, relay | tests 141–145 | DONE |
 | F8 | Migration wizard (H5) completion: EAN-13, category, external_key, brief routes, import_staging, tabs UI | tests 146–150 | DONE |
+| F9 | Reports and owner console (H6) completion: live today dashboard, Z-report detail, profit/VAT/Z pages, cloud owner console, offline shell | tests 151–160 | DONE |
 
 ## M0 — Setup
 
@@ -2241,3 +2242,107 @@ $ scripts/check-tenant-tables.sql
 * **No test is mocked.** The F8 tests call the real SQL functions, the real route handlers with a
   real access token, and the real local Postgres. Test 150 renders the component with
   `react-dom/server` (there is no jsdom in this repo).
+
+## F9 — Reports and owner console (H6) completion
+
+F9 is a completion slice over the reports surface H6 already shipped (ADR-0045–0048, tests 86–95).
+H6 built `daily_product_sales`, the profit / VAT / Z-report / GL / sync report functions, the
+`/api/reports/profit`, `/api/reports/vat` and `/api/reports/z-reports` routes, and the `/reports`
+page. F9 fills the named gaps H6 left, and it is additive: no core table or function changes
+(ADR-0065, ADR-0076). After F8's 150, F9 owns tests **151–160** (ADR-0010).
+
+### What F9 adds
+
+* **Migration** `supabase/migrations/20260101220000_reports_f9.sql`
+  * `app.report_today(p_org_id, p_branch_id)` — today's live figures in one call: takings by
+    currency (USD / ZWG) and in base (USD), sale count and gross from `pos_sales` /
+    `invoices.subtotal`, sales by till and by branch, the low-stock list (on-hand below five, from
+    `stock_balances`), the open laybys that have reached their due date, the fiscal queue
+    (`fiscal_invoices` by state with the failed amount) and the sync status (reusing
+    `app.report_last_sync`). Every figure is bounded by `created_at >= current_date`, so it reads the
+    branch's `(org_id, branch_id, created_at DESC)` index and never a materialised view (ADR-0046).
+  * `app.report_z_report_detail(p_org_id, p_branch_id, p_z_report_id)` — one Z-report by primary
+    key, with the fiscal totals computed at read time (ADR-0047), the VAT-by-rate split and the
+    sale / void counts, so the detail page is a single indexed lookup.
+  * Both are read-only `security invoker` `stable` functions, granted to `authenticated` and
+    `service_role`.
+* **Module** `src/verticals/reports/reports.ts`: `todayFigures`, `zReportDetail` and the shared
+  `syncAgeLabel` (the "Last sync: …" label, unit-tested for never / just now / minutes / clock skew).
+* **Module** `src/verticals/reports/client.ts`: the browser report client (a thin `fetch` wrapper
+  with the bearer token and a keyset-cursor helper). Imported by path so the `'use client'` directive
+  never leaks into a server barrel.
+* **Routes**: `GET /api/reports/today` and `GET /api/reports/z-reports/:id`, thin handlers over the
+  two functions, scoping the branch through `resolveBranchId` (an explicit `branch_id` is allowed
+  only when the token scopes it, else 403; an unknown Z-report is 404).
+* **Pages**: `/reports/today`, `/reports/profit`, `/reports/vat` (the ZIMRA 0% / 15% split),
+  `/reports/z` (the keyset list) and `/reports/z/[id]` (the detail with a 58mm print). A shared
+  `ReportsNav` links them; `/reports` gains the nav and the sub-page links.
+* **Owner console** `src/app/cloud/reports/page.tsx`: reads the same `/api/reports/*` endpoints
+  through the same client as the branch, so the two consoles cannot drift (ADR-0049), and it always
+  shows "Last sync: …".
+* **Offline**: `public/sw.js` cache bumped to `erp-branch-v3`; the report pages join the app-shell
+  precache and the offline route match covers `/reports`.
+
+### The F9 tests (`tests/reports-f9.test.ts`)
+
+| Test | What it proves |
+| --- | --- |
+| 151 | `report_today` shows today's takings by currency and by till, and the base total |
+| 152 | Today is read live; a closed-day fact and a yesterday sale are not counted |
+| 153 | `report_today` lists low stock (on-hand below five) and nothing above it |
+| 154 | `report_today` lists only open laybys that have reached their due date |
+| 155 | `report_today` counts the fiscal queue by state and sums the failed amount |
+| 156 | `report_today` carries the same sync status as `report_last_sync` |
+| 157 | A Z-report detail carries the same fiscal totals the list carries |
+| 158 | A Z-report detail for an unknown id is not found |
+| 159 | The today and Z-report detail routes answer with a real token and scope the branch |
+| 160 | `report_today` reads today through the branch index |
+
+### Gate evidence
+
+```
+$ npm test
+ Test Files  32 passed (32)
+      Tests  224 passed (224)
+
+$ npx next lint
+✔ No ESLint warnings or errors
+
+$ npx tsc --noEmit
+(no output — clean)
+
+$ npm run build
+ ✓ Compiled successfully
+
+$ node_modules/.bin/supabase db reset
+Applying migration 20260101220000_reports_f9.sql...
+Finished supabase db reset
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065, ADR-0076). F9 adds two read-only
+  `security invoker` functions and their grants, two routes, five pages, a nav, a client and the
+  shared label helper. No new table, so no tenant-table RLS registration is needed; both invariant
+  checks still return zero rows.
+* **The brief's fact column names are not applied.** The brief lists `(org_id, branch_id,
+  product_id, variant_id, date, qty_sold, revenue_base, cogs, profit)`; H6 shipped the same table
+  with `business_date`, `qty`, `gross`, `tax`, `cogs`, `currency` (and `shift_id` / `z_report_id`),
+  which is what `app.close_shift` writes and what tests 86–95 read. F9 does not rename an
+  append-only column (`profit` is `gross - cogs`, computed in the report functions); renaming would
+  edit an H6 migration, which the additive rule forbids.
+* **The 1M-fact perf check.** Over 1,000,000 `daily_product_sales` rows seeded with `generate_series`
+  inside one SQL statement, a one-year `app.report_profit_by_product` page runs in ~10 ms warm
+  (39 ms cold) and uses the product index. The Phase 2 `docs/perf/` trial-balance run is unchanged.
+* **No test is mocked.** The F9 tests call the real SQL functions and the real route handlers with a
+  real access token against the real local Postgres.
+* **Two documented transient flakes were observed and cleared.** Across ten full-suite runs, `retail-r2`
+  test 8 (planner-statistics dependent, AGENTS.md) failed twice and `import-h5` test 75 (the 2 s
+  timing gate) failed once; each passes in isolation and on re-run, and eight of the ten full runs
+  were 224/224. They are not related to F9.
