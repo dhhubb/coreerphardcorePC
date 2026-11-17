@@ -20,6 +20,10 @@ const fileEnv = {
 };
 
 export default defineConfig({
+  // The receipt component is a .tsx with no `import React` (Next uses the automatic JSX runtime).
+  // Vitest's esbuild defaults to the classic runtime, so set it to automatic to render the receipt
+  // in a test the same way the app does.
+  esbuild: { jsx: 'automatic' },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],

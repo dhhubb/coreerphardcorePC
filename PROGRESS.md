@@ -37,6 +37,9 @@ tests 112–118.
 | F2 | Admin products/pricing/promotions console | tests 119–121 | DONE |
 | F3 | Operations, Z-report, receipt and stocktake UI | tests 122–127 | DONE |
 | F4 | Branch server UI/behaviour completion: device codes, PIN login, health, offline shell | tests 128–130 | DONE |
+| F5 | Sync engine (H2) completion | tests 131–135 | DONE |
+| F6 | Fiscal and numbering (H3) completion | tests 136–140 | DONE |
+| F7 | Hardware and receipts (H4) completion: scanner hook, camera, IndexedDB holds, relay | tests 141–145 | DONE |
 
 ## M0 — Setup
 
@@ -2056,3 +2059,96 @@ $ scripts/check-tenant-tables.sql
   real claim route. The FDMS device is the in-memory mock — a real object with real state.
 * **Redis.** The full suite still needs a local Redis for the R2/F2/F3 tests; the run used
   `redis:7-alpine` on 6379.
+
+## F7 — Hardware and receipts (H4) completion
+
+F7 is a completion slice over the hardware-and-receipts surface H4 already shipped. H4 built the
+ESC/POS generator, the 58mm receipt, the printer settings page, the branch relay and the
+camera/scanner helpers, with tests 69–74 (plus the unnumbered `hardware-h4-printer`,
+`hardware-h4-units` and `hardware-h4-api` suites). F7 fills the named gaps H4 left, and it is
+additive: no core table or core function changed, no applied migration edited (ADR-0065, ADR-0074).
+
+### What was built
+
+* **`useScannerInput`** (`src/verticals/pos/useScannerInput.ts`): a hook that owns the document
+  keydown listener and drives a DOM-free `createScannerController()` (the same `ScannerBuffer`
+  state machine). `/pos/page.tsx` now calls the hook instead of holding the buffer and the listener
+  inline; behaviour is unchanged.
+* **`CameraScanner`** (`src/verticals/pos/CameraScanner.tsx`): renders the preview and starts
+  `startCameraScan()` only when `cameraSupported()` is true, and otherwise shows
+  `CAMERA_HTTPS_MESSAGE` — "Camera scan requires HTTPS". It imports no camera library at module
+  load, so a build without `@zxing/library` is unaffected.
+* **The branch camera toggle** (`supabase/migrations/20260101200000_hardware_f7.sql`): a new
+  branch-scoped table `public.pos_device_settings` (`camera_enabled`, one row per branch) with
+  `app.get/set_pos_device_settings`, registered in `scripts/check-tenant-tables.sql` and
+  `tests/support/tenant-tables.ts`. A new `/api/pos/device` route reads and writes it;
+  `/pos/settings` gains the checkbox (with the HTTPS note where the page is not secure); the till
+  reads the flag and renders `CameraScanner` only when it is on. The flag lives in its own table
+  rather than in `printer_settings`: that table is about printing, and a camera is not a printer.
+* **IndexedDB holds** (`src/verticals/pos/idbStorage.ts`): `createIndexedDbStorage(dbName,
+  storeName)` (a real IndexedDB-backed `StateStorage`) and `memoryStorage()` (the server-side and
+  injected-test fallback). The cart store's default storage is now IndexedDB, so parked carts
+  survive a reload; the injected-storage test path is preserved. This is a cache the till rebuilds
+  from the server, never a ledger.
+* **`POST /api/printer/relay`** (`src/app/api/printer/relay/route.ts`): the brief's name for the
+  branch LAN relay. H4's `/api/branch/print` now delegates to it, and the network transport points
+  at the brief's path, so nothing that already printed breaks.
+* **The 58mm print rule** was already present on `/pos` (`@page { width: 58mm; margin: 0 }`), so it
+  needed no change.
+
+### The F7 tests (`tests/hardware-f7.test.ts`)
+
+ADR-0010 forbids renumbering: a new run continues from the highest number actually present, which
+after F6 is 140. See ADR-0074.
+
+| Canonical | Test |
+| --- | --- |
+| 141 | The scanner controller buffers a fast burst as one barcode and a slow burst as typing |
+| 142 | The IndexedDB storage round-trips a persisted cart, reviving money as Decimal |
+| 143 | The `CameraScanner` renders the HTTPS note where a camera cannot work; the default is off |
+| 144 | The camera toggle persists through `app.get/set_pos_device_settings` and is org-scoped under RLS |
+| 145 | `POST /api/printer/relay` writes ESC/POS bytes to the LAN printer; the H4 path delegates |
+
+The e2e `e2e/hardware-f7.e2e.ts` is an unnumbered Playwright navigation test (exactly as H4's is):
+a one-item cash sale is scan → F9 → Enter, read at the document level, with the camera absent on an
+insecure origin. It needs Playwright browsers, which are not installed in this run's environment, so
+it was written to the H4 pattern but not executed here.
+
+### Gate
+
+```
+$ node_modules/.bin/supabase db reset
+Applying migration 20260101200000_hardware_f7.sql...
+Finished supabase db reset on branch f5-sync-engine-completion.   (all migrations apply to an empty DB)
+
+$ npm test
+ Test Files  30 passed (30)
+      Tests  209 passed (209)
+
+$ npm run build
+✓ Compiled successfully   (incl. the new /api/printer/relay and /api/pos/device routes)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065, ADR-0074); the tenant invariant checks
+  still return zero rows. `pos_device_settings` is registered as a branch-scoped tenant table and
+  carries `org_id`, `created_at`, RLS enabled and forced, the `(org_id, branch_id, created_at DESC,
+  id DESC)` index, and an index on its foreign key.
+* **No test is mocked.** The F7 tests call the real SQL functions and TS wrappers against the real
+  local Postgres. Test 145 drives the relay against a real TCP server standing in for the printer
+  (branch mode), and test 142 uses a real IndexedDB (`fake-indexeddb`); test 143 renders the
+  component with `react-dom/server` (there is no jsdom in this repo).
+* **Flake observed.** One full-suite run failed `retail-r2` test 8, a planner index-choice assertion
+  in a file F7 never touches; it passed on the pristine base and on two subsequent full runs (the
+  planner's choice depends on table statistics, which other test files perturb). No test was
+  weakened.

@@ -143,7 +143,7 @@ export function networkPrinterTransport(
   return {
     kind: 'network',
     async send(bytes: Uint8Array): Promise<PrintResult> {
-      const response = await apiFetch('/api/branch/print', {
+      const response = await apiFetch('/api/printer/relay', {
         method: 'POST',
         body: JSON.stringify({
           host: settings.host,

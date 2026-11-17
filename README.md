@@ -37,6 +37,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [The branch-server console (F4)](#the-branch-server-console-f4)
 - [The sync engine completion (F5)](#the-sync-engine-completion-f5)
 - [The fiscal and numbering completion (F6)](#the-fiscal-and-numbering-completion-f6)
+- [Hardware and receipts completion (F7)](#hardware-and-receipts-completion-f7)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -789,10 +790,13 @@ H4 makes the till usable at the counter: a scanner that works without focus, thr
 receipt that prints within a second of the sale. See ADR-0039 to ADR-0041.
 
 **Keyboard-wedge scanner.** A scanner is a keyboard: it types the barcode and sends Enter. The till
-reads keystrokes at the document level (`ScannerBuffer` in `src/verticals/pos/scanner.ts`), so a scan
-works no matter what has focus. The same buffer serves a hand-typed barcode plus Enter, so there is
-one code path for both. A camera scanner is offered only over HTTPS (a plain-HTTP LAN cannot grant
-camera access, so the affordance is hidden rather than shown and failing).
+reads keystrokes at the document level (`ScannerBuffer` in `src/verticals/pos/scanner.ts`, wrapped by
+the `useScannerInput` hook in `src/verticals/pos/useScannerInput.ts`), so a scan works no matter what
+has focus. The same buffer serves a hand-typed barcode plus Enter, so there is one code path for
+both. A camera scanner (`CameraScanner`, over `startCameraScan()`) is offered only over HTTPS (a
+plain-HTTP LAN cannot grant camera access, so the component shows "Camera scan requires HTTPS"
+rather than a control that would fail). The branch turns the camera on per branch in `/pos/settings`
+(`pos_device_settings.camera_enabled`).
 
 **Shortcuts.** F2 focuses the scan field, F3 holds the cart, F4 recalls it, F9 opens payment with the
 exact amount preselected (Enter confirms), F10 pays in ZWG. The mapping is one pure table
@@ -812,7 +816,7 @@ the till. Two transports, per branch, stored in `printer_settings`:
 * **network** — the till generates the ESC/POS bytes and the **branch** relays them to the printer on
   the shop LAN (`host:port`, default 9100). Only the branch opens the socket (decision 16). The bytes
   travel as base64 inside JSON — a transport encoding — and the branch writes the decoded raw bytes
-  to the socket (`POST /api/branch/print`).
+  to the socket (`POST /api/printer/relay`; H4's `/api/branch/print` delegates to it).
 
 ```bash
 # Configure a branch's network printer (a branch member's token; org comes from the token)
@@ -826,6 +830,21 @@ curl -X POST https://cloud.example/api/pos/printer/test -H "Authorization: Beare
 
 **The printer table.** `public.printer_settings` (org + branch) carries `org_id`, `created_at`, forced
 RLS and the standard indexes, and is registered in `scripts/check-tenant-tables.sql`.
+
+**Holds and the cart.** The cart (in progress and parked carts) persists in **IndexedDB**
+(`src/verticals/pos/idbStorage.ts`) via the cart store's default storage, so parked carts survive a
+reload. Money is revived as a Decimal. This is a cache the till rebuilds from the server, never a
+ledger; on the server there is no IndexedDB, so the storage degrades to an in-memory map.
+
+## Hardware and receipts completion (F7)
+
+F7 closes the parts of the hardware-and-receipts brief H4 left backend-only, additively (ADR-0065,
+ADR-0074). It adds `useScannerInput` (the hook over the scanner buffer), the `CameraScanner`
+component and its HTTPS message, the per-branch camera toggle in `/pos/settings`
+(`pos_device_settings`, read by `GET /api/pos/device` and written by `PUT /api/pos/device`), the
+IndexedDB cart storage, and `POST /api/printer/relay` (with `/api/branch/print` delegating to it).
+No core table and no core posting function is touched; tests 141–145 cover it in
+`tests/hardware-f7.test.ts`.
 
 ## Migration wizard (H5)
 
@@ -1246,12 +1265,13 @@ scan. Output is written to `docs/perf/`. The run records timings and does not fa
 | 128–130 | F4: branch-server console (offline sale, PIN, badge, app shell) | `tests/frontend-f4.test.ts`, `e2e/branch-f4.e2e.ts` |
 | 131–135 | F5: sync engine completion (non-blocking reject, both versions, new facts, price version, backup) | `tests/sync-f5.test.ts`, `e2e/sync-f5.e2e.ts` |
 | 136–140 | F6: fiscal and numbering completion (invoice number, named index, backoff, exactly-once, block top-up) | `tests/fiscal-f6.test.ts` |
+| 141–145 | F7: hardware and receipts completion (scanner hook, camera, IndexedDB holds, relay) | `tests/hardware-f7.test.ts`, `e2e/hardware-f7.e2e.ts` |
 
 H1's tests are numbered 49–51 because R4 already owns 14–18 and R5 owns 19–24; the H1 brief called
 them 16–18. H2 continues from 52 (ADR-0033) and H3 from 63 (ADR-0038). ADR-0026, ADR-0033 and
 ADR-0038 record the mappings. F2 continues from F1's 118 (ADR-0069); F3 continues from F2's 121
 (ADR-0070); F4 continues from F3's 127 (ADR-0071); F5 continues from F4's 130 (ADR-0072); F6
-continues from F5's 135 (ADR-0073). The F2
+continues from F5's 135 (ADR-0073); F7 continues from F6's 140 (ADR-0074). The F2
 brief called its tests 43–45 and the F3 brief called its tests 46–51; those numbers are already taken
 by Phase 1 retail (R1/R2) and branch (H1) tests, and the F5 brief's own numbers collide with the
 tenancy tests, so F5 continues from 130. The F6 brief's own numbers (1–25) collide with the tenancy

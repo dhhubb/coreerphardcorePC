@@ -18,9 +18,9 @@ import {
   loadPrinterSettings,
   type PrinterSettings,
 } from '@/verticals/pos/printing';
-import { ScannerBuffer } from '@/verticals/pos/scanner';
+import { useScannerInput } from '@/verticals/pos/useScannerInput';
 import { resolveShortcut, shortcutHint } from '@/verticals/pos/shortcuts';
-import { cameraSupported, startCameraScan, type CameraScanner } from '@/verticals/pos/camera';
+import { CameraScanner } from '@/verticals/pos/CameraScanner';
 import {
   cartTotals,
   remainingBase,
@@ -92,9 +92,8 @@ export default function PosPage() {
   const [syncing, setSyncing] = useState(false);
   const [payOpen, setPayOpen] = useState(false);
   const [printer, setPrinter] = useState<PrinterSettings>(defaultPrinterSettings());
+  const [cameraEnabled, setCameraEnabled] = useState(false);
   const [timings, setTimings] = useState<CheckoutTimings | null>(null);
-  const [cameraOn, setCameraOn] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [shopName] = useState(defaultShop().name);
   const [claims, setClaims] = useState<SessionClaims | null>(null);
 
@@ -108,9 +107,6 @@ export default function PosPage() {
   }, [router]);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const cameraRef = useRef<CameraScanner | null>(null);
-  const scannerRef = useRef(new ScannerBuffer());
   const busyRef = useRef(false);
 
   const health = useBranchHealth();
@@ -161,6 +157,13 @@ export default function PosPage() {
         if (!cancelled) setPrinter(settings);
       } catch {
         /* keep the browser default */
+      }
+
+      try {
+        const device = await apiJson<{ camera_enabled: boolean }>('/api/pos/device');
+        if (!cancelled) setCameraEnabled(device.camera_enabled);
+      } catch {
+        /* keep the camera off */
       }
     })();
     return () => {
@@ -442,20 +445,40 @@ export default function PosPage() {
     ],
   );
 
-  // The document-level scanner and shortcut handler: a scan works no matter what has focus, and the
-  // shortcuts work from anywhere on the till. Keys typed into the scan field are handled by the
-  // field's own onKeyDown above, so this ignores them to avoid double counting.
-  useEffect(() => {
-    const isScanField = (target: EventTarget | null): boolean =>
-      target instanceof HTMLElement && target.dataset.testid === 'scan';
+  // The keyboard-wedge scanner (F7): a burst of characters ending in Enter is a barcode, read at
+  // the document level so a scan works no matter what has focus. The field's own onKeyDown handles
+  // keys typed into it, so the hook ignores the scan field to avoid counting a scan twice.
+  const scanner = useScannerInput({
+    ignoreWhen: (target) =>
+      target instanceof HTMLElement && target.dataset.testid === 'scan',
+    onChar: (value) => setScan((current) => current + value),
+    onScan: (code) => {
+      bumpActions();
+      setScan('');
+      void scanNow(code);
+    },
+    onEnter: () => {
+      bumpActions();
+      if (status === 'paid' || status === 'queued' || status === 'error') {
+        clear();
+        setPayOpen(false);
+        setTimings(null);
+        return;
+      }
+      if (remaining.isZero() && tenders.length > 0) void checkout();
+    },
+  });
 
+  // The document-level shortcuts: F2/F3/F4/F9/F10 work no matter what has focus. Keys typed into
+  // the scan field are handled by the field's own onKeyDown, so the scanner hook ignores them.
+  useEffect(() => {
     const onDocumentKeyDown = (event: KeyboardEvent) => {
-      const inField = isScanField(event.target);
       const shortcut = resolveShortcut(event.key);
+      if (shortcut === null) return;
       if (shortcut === 'scan') {
         event.preventDefault();
         bumpActions();
-        scannerRef.current.reset();
+        scanner.reset();
         setScan('');
         inputRef.current?.focus();
         return;
@@ -463,7 +486,7 @@ export default function PosPage() {
       if (shortcut === 'hold') {
         event.preventDefault();
         bumpActions();
-        scannerRef.current.reset();
+        scanner.reset();
         setScan('');
         hold();
         return;
@@ -486,76 +509,11 @@ export default function PosPage() {
         payExact('ZWG');
         return;
       }
-      if (inField) return;
-
-      const decision = scannerRef.current.feed({ key: event.key, timeStamp: event.timeStamp });
-      if (decision.kind === 'char') {
-        event.preventDefault();
-        setScan((current) => current + decision.value);
-        return;
-      }
-      if (decision.kind === 'scan') {
-        event.preventDefault();
-        bumpActions();
-        setScan('');
-        void scanNow(decision.code);
-        return;
-      }
-      if (decision.kind === 'enter' && event.key === 'Enter') {
-        event.preventDefault();
-        bumpActions();
-        if (status === 'paid' || status === 'queued' || status === 'error') {
-          clear();
-          setPayOpen(false);
-          setTimings(null);
-          return;
-        }
-        if (remaining.isZero() && tenders.length > 0) void checkout();
-      }
     };
 
     document.addEventListener('keydown', onDocumentKeyDown);
     return () => document.removeEventListener('keydown', onDocumentKeyDown);
-  }, [
-    bumpActions,
-    hold,
-    recall,
-    scanNow,
-    status,
-    clear,
-    remaining,
-    tenders.length,
-    checkout,
-    payExact,
-  ]);
-
-  const toggleCamera = useCallback(async () => {
-    if (cameraOn) {
-      cameraRef.current?.stop();
-      cameraRef.current = null;
-      setCameraOn(false);
-      return;
-    }
-    setCameraError(null);
-    try {
-      const video = videoRef.current;
-      if (!video) return;
-      const scanner = await startCameraScan({
-        video,
-        onResult: (code) => {
-          bumpActions();
-          void scanNow(code);
-        },
-        onError: (error) => setCameraError(error.message),
-      });
-      cameraRef.current = scanner;
-      setCameraOn(true);
-    } catch (caught) {
-      setCameraError((caught as Error).message);
-    }
-  }, [cameraOn, bumpActions, scanNow]);
-
-  useEffect(() => () => cameraRef.current?.stop(), []);
+  }, [bumpActions, hold, recall, scanner, payExact]);
 
   return (
     <main className="pos" onMouseDown={(event) => event.preventDefault()}>
@@ -589,14 +547,13 @@ export default function PosPage() {
           />
         </label>
 
-        {cameraSupported() && (
-          <div className="camera">
-            <button type="button" data-testid="camera-toggle" onClick={() => void toggleCamera()}>
-              {cameraOn ? 'Stop camera' : 'Scan with camera'}
-            </button>
-            <video ref={videoRef} data-testid="camera-video" muted playsInline style={{ width: 200 }} />
-            {cameraError && <span className="error">{cameraError}</span>}
-          </div>
+        {cameraEnabled && (
+          <CameraScanner
+            onScan={(code) => {
+              bumpActions();
+              void scanNow(code);
+            }}
+          />
         )}
 
         {hits.length > 0 && (

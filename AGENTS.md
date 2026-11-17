@@ -225,6 +225,21 @@ psql "$DATABASE_URL" -f scripts/check-tenant-tables.sql  # must be 0 rows
 * **A number-block top-up must compare the ACTIVE block's own remaining count, not the total
   headroom.** Counting every fetched-ahead block makes the low-water test never fire while the
   current block drains (ADR-0073).
+* **There is no jsdom in this repo.** A React component test renders with `react-dom/server` via
+  `createElement(Component, props)` — calling `Component(props)` directly runs the hooks outside a
+  renderer and throws "Cannot read properties of null (reading 'useState')". `react-dom/server` is
+  enough to assert a component's static/HTTPS-gated markup (ADR-0074).
+* **A relay/print test must set `process.env.BRANCH_MODE = 'branch'`.** The printer relay routes
+  return 409 on the cloud (decision 16), so a test that posts to `/api/printer/relay` or
+  `/api/branch/print` sees 409 until branch mode is set (ADR-0074).
+* **`fake-indexeddb` is loaded per test file with `import 'fake-indexeddb/auto'`** at the top, so a
+  storage test exercises a real IndexedDB open/upgrade/transaction path. `idbStorage`'s default
+  `createIndexedDbStorage` is a no-op stub on the server (no `indexedDB`), so a page that imports the
+  cart store still builds and SSRs (ADR-0074).
+* **`retail-r2` test 8 is planner-statistics dependent** and can fail in a full parallel run (the
+  planner picks `price_list_items_org_list_idx` instead of `price_list_items_list_variant_key` after
+  other files perturb the stats) while passing in isolation and on a fresh `db reset`. It is not
+  related to a vertical slice's changes; re-run the suite to confirm before investigating.
 
 ## Test numbering
 
@@ -249,6 +264,8 @@ UI/behaviour completion) owns 128–130 (`tests/frontend-f4.test.ts`, ADR-0071; 
 them 16–18, but those are taken by R4/H1). F5 (sync engine completion) owns 131–135
 (`tests/sync-f5.test.ts`, ADR-0072; the F5 brief's own numbers collide with the tenancy tests). F6
 (fiscal and numbering completion) owns 136–140 (`tests/fiscal-f6.test.ts`, ADR-0073; the F6 brief's
-own numbers 1–25 collide with the tenancy and accounting tests). A new
+own numbers 1–25 collide with the tenancy and accounting tests). F7 (hardware and receipts
+completion) owns 141–145 (`tests/hardware-f7.test.ts`, ADR-0074; the F7 brief's own numbers collide
+with the core tests). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).

@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import { createJSONStorage, persist, type PersistStorage, type StateStorage } from 'zustand/middleware';
+import { createIndexedDbStorage, memoryStorage } from './idbStorage';
 
 /**
  * Cart state for the till. Zustand only — no server call holds the cart, so a scan is instant and
@@ -9,9 +10,15 @@ import { createJSONStorage, persist, type PersistStorage, type StateStorage } fr
  * Money stays a decimal string end to end: the till never turns a price into a JS number.
  *
  * The cart is persisted (F3) so a reload — a browser crash, an accidental refresh — does not lose a
- * half-rung sale or the parked carts. `Decimal` instances are stored as their plain string form and
- * revived on rehydrate; the JSON round-trip never sees a number for money.
+ * half-rung sale or the parked carts. F7 moves the persisted store to IndexedDB (an IndexedDB table
+ * per the brief), so a parked cart survives a browser restart and a large cart does not compete with
+ * the small synchronous `localStorage` budget. `Decimal` instances are stored as their plain string
+ * form and revived on rehydrate; the JSON round-trip never sees a number for money.
  */
+
+/** The IndexedDB database and object store the persisted cart (and its parked carts) lives in (F7). */
+export const CART_DB_NAME = 'erp-pos-cart';
+export const CART_STORE = 'cart';
 
 export interface CartLine {
   key: string;
@@ -119,7 +126,7 @@ function lineKey(variantId: string, unitPrice: Decimal): string {
 /**
  * Build the till's cart store over a given storage. The store is created through a factory so a test
  * can hand it an in-memory storage and assert the persist/revive round-trip without a browser; the
- * page uses the default (`createCartStore()`, which binds `localStorage`).
+ * page uses the default (`createCartStore()`, which binds the IndexedDB store).
  */
 export function createCartStore(storage?: StateStorage): UseBoundStore<StoreApi<CartState>> {
   return create<CartState>()(
@@ -232,24 +239,16 @@ export function createCartStore(storage?: StateStorage): UseBoundStore<StoreApi<
 }
 
 /** A no-op storage, so importing the store on the server (a Node test, an SSR pass) never throws. */
-function memoryFallback(): StateStorage {
-  const map = new Map<string, string>();
-  return {
-    getItem: (name) => map.get(name) ?? null,
-    setItem: (name, value) => void map.set(name, value),
-    removeItem: (name) => void map.delete(name),
-  };
-}
-
 function cartStorage(injected?: StateStorage): PersistStorage<unknown> | undefined {
   if (injected) return createJSONStorage(() => injected, { reviver: reviveDecimal });
-  if (typeof window === 'undefined' || !window.localStorage) {
-    return createJSONStorage(memoryFallback, { reviver: reviveDecimal });
-  }
-  return createJSONStorage(() => window.localStorage, { reviver: reviveDecimal });
+  // F7: the persisted cart (including the parked carts) lives in IndexedDB, not localStorage. The
+  // IndexedDB storage degrades to an in-memory map on the server, so this is safe to import anywhere.
+  return createJSONStorage(() => createIndexedDbStorage(CART_DB_NAME, CART_STORE), {
+    reviver: reviveDecimal,
+  });
 }
 
-/** The till's cart store, bound to the browser's `localStorage` (or a no-op storage on the server). */
+/** The till's cart store, bound to IndexedDB (or a no-op storage on the server). */
 export const useCart = createCartStore();
 
 /** The money keys on a cart line, in one place so the reviver and `recompute` agree. */

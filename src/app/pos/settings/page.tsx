@@ -5,24 +5,32 @@ import { apiFetch, apiJson } from '@/verticals/pos/api';
 import { Receipt58mm } from '@/verticals/pos/Receipt58mm';
 import { sampleReceiptData } from '@/verticals/pos/printing';
 import type { PrinterMode, PrinterSettings } from '@/verticals/pos/printing';
+import { CAMERA_HTTPS_MESSAGE } from '@/verticals/pos/CameraScanner';
+import { cameraSupported } from '@/verticals/pos/camera';
 
 /**
- * Printer settings (H4).
+ * Printer and device settings (H4, extended by F7).
  *
  * The operator chooses how the till prints: the browser's print dialog, or a network printer on the
  * shop LAN (`host:port`, default 9100) that the branch relays the ESC/POS bytes to. A test-print
  * button proves the choice before the next customer arrives. The settings live in the database, so
  * every till in the branch prints the same way.
+ *
+ * F7 adds the optional camera scanner: the branch turns it on here, and the till then offers it.
+ * A camera needs a secure context (HTTPS), so the toggle says so where the page is not secure.
  */
 export default function PrinterSettingsPage() {
   const [mode, setMode] = useState<PrinterMode>('browser');
   const [host, setHost] = useState('');
   const [port, setPort] = useState('9100');
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [cameraSecure, setCameraSecure] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    setCameraSecure(cameraSupported());
     void (async () => {
       try {
         const settings = await apiJson<PrinterSettings>('/api/pos/printer');
@@ -31,6 +39,12 @@ export default function PrinterSettingsPage() {
         setPort(String(settings.port));
       } catch {
         /* no settings yet; keep the browser default */
+      }
+      try {
+        const device = await apiJson<{ camera_enabled: boolean }>('/api/pos/device');
+        setCameraEnabled(device.camera_enabled);
+      } catch {
+        /* no device settings yet; keep the camera off */
       } finally {
         setLoaded(true);
       }
@@ -52,11 +66,15 @@ export default function PrinterSettingsPage() {
       setMode(settings.mode);
       setHost(settings.host ?? '');
       setPort(String(settings.port));
+      await apiJson<{ camera_enabled: boolean }>('/api/pos/device', {
+        method: 'PUT',
+        body: JSON.stringify({ camera_enabled: cameraEnabled }),
+      });
       setStatus('Saved');
     } catch (caught) {
       setError((caught as Error).message);
     }
-  }, [mode, host, port]);
+  }, [mode, host, port, cameraEnabled]);
 
   const testPrint = useCallback(async () => {
     setError(null);
@@ -145,6 +163,25 @@ export default function PrinterSettingsPage() {
           bytes and the branch writes them to the printer&apos;s raw port. Browser mode always works
           with no configuration.
         </p>
+
+        <hr style={{ margin: '20px 0' }} />
+
+        <h2 style={{ fontSize: 16 }}>Camera scanner</h2>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <input
+            type="checkbox"
+            data-testid="camera-enabled"
+            checked={cameraEnabled}
+            disabled={!loaded}
+            onChange={(event) => setCameraEnabled(event.target.checked)}
+          />
+          Offer the camera scanner on this branch&apos;s tills
+        </label>
+        {!cameraSecure && (
+          <p data-testid="camera-insecure-note" style={{ color: '#b00', fontSize: 13 }}>
+            {CAMERA_HTTPS_MESSAGE}. Serve the till over HTTPS to use a camera.
+          </p>
+        )}
       </section>
 
       <section className="print-only">

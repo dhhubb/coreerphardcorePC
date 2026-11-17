@@ -79,6 +79,8 @@ export const TENANT_TABLES: TenantTable[] = [
   { name: 'number_blocks', scope: 'branch', highVolume: true, partitioned: false },
   // H4 (hardware and receipts): the branch's printer configuration.
   { name: 'printer_settings', scope: 'branch', highVolume: true, partitioned: false },
+  // F7 (hardware completion): the branch's device settings (the optional camera toggle).
+  { name: 'pos_device_settings', scope: 'branch', highVolume: true, partitioned: false },
   // H5 (migration wizard): the staging tables and the saved column mappings.
   { name: 'import_jobs', scope: 'branch', highVolume: true, partitioned: false },
   { name: 'import_rows', scope: 'branch', highVolume: true, partitioned: false },
@@ -632,6 +634,13 @@ export async function seedOneRowPerTenantTable(
        (org_id, branch_id, business_date, shift_id, product_id, qty, gross, tax, cogs)
      values ($1, $2, current_date - 1, $3, $4, 1, 10, 1.5, 4)`,
     [orgId, branchId, shiftId, productId],
+  );
+
+  // F7 (hardware completion): the branch's device settings.
+  await sql(
+    `insert into public.pos_device_settings (org_id, branch_id, camera_enabled)
+     values ($1, $2, false)`,
+    [orgId, branchId],
   );
 
   return {

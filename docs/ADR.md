@@ -1811,3 +1811,83 @@ talk over the wire; no database is mocked.
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F6
 builds neither.
+
+## ADR-0074 — F7 completes the hardware-and-receipts slice; its tests are 141–145
+
+**Context.** The brief for this run is "RUN H4 (now F7) — Hardware and receipts, keyboard only". H4
+already shipped in an earlier run: `supabase/migrations/20260101100000_hardware_h4.sql`,
+`src/verticals/pos/{scanner,printing,escpos,receiptData,Receipt58mm,camera}.ts`, the printer and
+receipt routes, the `/pos/settings` printer page, and tests 69–74 plus the unnumbered
+`tests/hardware-h4-printer.test.ts`, `tests/hardware-h4-units.test.ts` and
+`tests/hardware-h4-api.test.ts`. This is the same situation F2 (ADR-0069), F3 (ADR-0070), F4
+(ADR-0071), F5 (ADR-0072) and F6 (ADR-0073) faced: the requested backend largely exists, so the run
+is a completion slice over the gaps the brief names that H4 left backend-only. ADR-0065 governs the
+whole run: additive only, no core table and no core posting function touched, no applied migration
+edited.
+
+The gaps, verified against the tree before writing anything:
+
+* The brief names a **`useScannerInput`** hook. H4 shipped `ScannerBuffer` and wired the document
+  keydown handler inline in `/pos/page.tsx`; there was no reusable hook.
+* The brief names a **`CameraScanner`** component with the exact message **"Camera scan requires
+  HTTPS"**. H4 shipped `startCameraScan()` and `cameraSupported()` (the logic) but no component, and
+  no page used it.
+* The brief names a **camera toggle on `/pos/settings`**. H4's page was printer-only.
+* The brief requires **holds to persist in IndexedDB**. H4's cart store used `memoryStorage` for
+  holds, so parked carts were lost on reload.
+* The brief names **`POST /api/printer/relay`**. H4 shipped the same operation at
+  `/api/branch/print`.
+* The brief requires a **58mm print rule**. H4 already renders `@page { width: 58mm; margin: 0 }`
+  on `/pos`, so this was already satisfied and needed no change.
+
+**Decision.** F7 is delivered as an additive completion slice. It changes no core table and no core
+posting function, and it edits no applied migration.
+
+1. **`useScannerInput`** (`src/verticals/pos/useScannerInput.ts`) — a hook that owns the document
+   keydown listener and drives a DOM-free `createScannerController()` (the same `ScannerBuffer`
+   state machine). `/pos/page.tsx` now calls the hook instead of holding the buffer and the listener
+   inline; behaviour is unchanged.
+2. **`CameraScanner`** (`src/verticals/pos/CameraScanner.tsx`) — a component that renders the
+   preview and starts `startCameraScan()` only when `cameraSupported()` is true, and otherwise shows
+   `CAMERA_HTTPS_MESSAGE` ("Camera scan requires HTTPS"). It imports no camera library at module
+   load, so a build without `@zxing/library` is unaffected.
+3. **The branch camera toggle** — a new branch-scoped table `public.pos_device_settings`
+   (`camera_enabled`, one row per branch) with `app.get/set_pos_device_settings`, registered in
+   `scripts/check-tenant-tables.sql` and `tests/support/tenant-tables.ts`. A new `/api/pos/device`
+   route reads and writes it, `/pos/settings` gains the checkbox (with the HTTPS note where the page
+   is not secure), and the till reads the flag and renders `CameraScanner` only when it is on. The
+   flag lives in its own table rather than in `printer_settings`: that table is about printing, and a
+   camera is not a printer.
+4. **IndexedDB holds** (`src/verticals/pos/idbStorage.ts`) — `createIndexedDbStorage(dbName,
+   storeName)` (a real IndexedDB-backed `StateStorage`) and `memoryStorage()` (the server-side and
+   injected-test fallback). The cart store's default storage is now IndexedDB, so parked carts
+   survive a reload; the injected-storage test path is preserved. This is a cache the till rebuilds
+   from the server, never a ledger.
+5. **`POST /api/printer/relay`** — the brief's name for the branch LAN relay. H4's
+   `/api/branch/print` now delegates to it, and the network transport points at the brief's path, so
+   nothing that already printed breaks.
+
+**Consequence.** The brief's hook, component, HTTPS message, camera toggle, IndexedDB holds and
+relay route all exist, and the H4 behaviour and tests are unchanged. The cost is one small additive
+migration, two routes, one hook, one component, one storage helper and one page change.
+
+**Test numbering.** F7 owns **141–145** (ADR-0010: continue from the highest number actually
+present, which after F6 is 140). The brief's own numbers collide with the core tests; the mapping is
+recorded here. The e2e is an unnumbered Playwright navigation test, exactly as H4's is.
+
+| F7 test | Test |
+| --- | --- |
+| 141 | The scanner controller buffers a fast burst as one barcode and a slow burst as typing |
+| 142 | The IndexedDB storage round-trips a persisted cart, reviving money as Decimal |
+| 143 | The `CameraScanner` renders the HTTPS note where a camera cannot work; the default is off |
+| 144 | The camera toggle persists through `app.get/set_pos_device_settings` and is org-scoped under RLS |
+| 145 | `POST /api/printer/relay` writes ESC/POS bytes to the LAN printer; the H4 path delegates |
+
+All five are Vitest tests in `tests/hardware-f7.test.ts`, so `npm test` shows them (the brief's stop
+rule: a test counts only when `npm test` reports it). The relay test drives a real TCP server
+standing in for the printer, and the component test renders with `react-dom/server` (there is no
+jsdom in this repo); no database and no printer is mocked.
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F7
+builds neither.
