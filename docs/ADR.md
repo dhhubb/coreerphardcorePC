@@ -1891,3 +1891,86 @@ jsdom in this repo); no database and no printer is mocked.
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file (see the Phase 1 notes); F7
 builds neither.
+
+## ADR-0075 — F8 completes the migration wizard (H5); its tests are 146–150
+
+**Context.** The F8 brief (the run labelled "H5 (now F8): Migration wizard") asks for the
+`/settings/import` page with three tabs (Products / Customers / Opening Stock), a CSV drag-and-drop
+upload, a browser-side preview with PapaParse (first 20 rows), and a column-mapping screen that maps
+Pastel headings to our fields and saves the mapping per shop in localStorage. H5 already shipped
+most of this (ADR-0042, ADR-0043, ADR-0044): the `import_jobs` / `import_rows` / `import_mappings`
+tables, the mapping module, the chunked staging, the one-transaction commit, the opening-stock
+journal, the `/settings/import` page and tests **75–85**. F8 closes the parts of the brief H5 left
+out, additively (ADR-0065: core tables and functions are untouched). As with F2–F7, a completion
+slice adds one ADR and continues the test numbering from the highest number actually present
+(ADR-0010): after F7's 145, F8 owns **146–150**.
+
+**The gaps F8 closes.**
+
+1. **EAN-13 barcode checksum.** The brief names "barcode EAN-13 checksum validation"; H5 accepted
+   any barcode. `app.ean13_valid(text)` (SQL) and `ean13Valid(code)` (TypeScript, `mapping.ts`) now
+   check the modulo-10 check digit, and `app.import_row_errors` re-created flags a present-but-wrong
+   barcode. The 5,000-product sample carried mostly invalid check digits, so its barcodes were
+   regenerated as unique valid EAN-13 codes; no test read a specific sample barcode, so nothing else
+   changed.
+2. **The Pastel Category column.** The brief maps `Category→category`. H5 had no `category` field
+   and `products` has no text `category` column (only `category_id`), so `app.import_commit_job`
+   re-created now create-or-gets each named category (by slug, so an existing one is reused) and
+   links the product to it inside the same product upsert. The category is resolved inline, so there
+   is no second pass over the 5,000 rows (see the performance note).
+3. **The Cost column.** The brief maps `Cost→cost`. `products` gains a nullable `cost
+   numeric(19,4)` column (additive), and the products upsert records it.
+4. **The brief's `external_key` name.** The brief calls the Pastel code `external_key`; H5 shipped
+   it as `external_code` (as does `products.external_code`). Rather than rename a stored column,
+   `mapping.ts` accepts `external_key` as an alias (`canonicalField`) and normalises it to
+   `external_code`, so a mapping that targets either name works and no migration is needed.
+5. **The brief's route names.** The brief names `POST /api/import/chunk`, `/revalidate` and
+   `/commit`. H5 named them `/api/import/jobs`, `/jobs/:id/chunks`, `/jobs/:id/validate` and
+   `/jobs/:id/commit`. The brief's routes are added; they call the same `jobs.ts` functions. The H5
+   routes stay, so nothing that already used them breaks.
+6. **`public.import_staging`.** The brief names the staging table `import_staging` with `row_number`,
+   `raw`, `status` and `error`. It is added as a read-only, `security_invoker` VIEW over
+   `import_rows` with those column names, so the tenant RLS on `import_rows` still applies.
+7. **The wizard UI.** The three tabs, the drag-and-drop drop zone, the 20-row preview, the mapping
+   cached in localStorage per kind (in addition to the `import_mappings` row) and the per-row inline
+   edit that revalidates one row through `POST /api/import/revalidate`.
+
+**The COPY decision (a correction to H5's staging path).** H5 staged rows with `COPY ... FROM
+STDIN` (pg-copy-streams). That works when the connection is the `postgres` superuser — which is what
+the H5 tests use — but Postgres refuses `COPY FROM` under row-level security (`0A000`, "COPY FROM not
+supported with row-level security"). H5's staging therefore could not run on a request path, which
+always runs as `authenticated` (decision 15). F8 replaces the loader with **one set-based `INSERT
+... SELECT from jsonb_array_elements` per chunk**: it is RLS-safe (the INSERT policy still checks the
+org and branch), it stays one statement per chunk, and it needs no extra role. Ten chunks of 500 for
+a 5,000-row file.
+
+That change initially pushed H5's test 75 (the whole wizard under 2 s) over the gate, because the
+extra `INSERT ... SELECT` into the staging table plus F8's separate category `UPDATE` cost ~550 ms.
+Two fixes brought it back: the category is resolved **inline** in the product upsert (no second pass
+over the products), and the products insert is unchanged otherwise. The measured phases on the
+5,000-row sample are now ~0.2 s stage / ~0.35 s validate / ~1.3 s commit, comfortably under 2 s.
+
+**Consequence.** The brief's wizard exists end to end on a request path: the EAN-13 checksum, the
+Category and Cost columns, the `external_key` name, the brief-named routes, the `import_staging`
+view and the three-tab UI with its localStorage mapping. No core table or function is edited; the
+only schema changes are one additive nullable column (`products.cost`), one helper pair, a re-created
+H5 validation function and commit function, one view, and a widened status CHECK. Tests 75–85 are
+unchanged and still pass.
+
+**Test numbering.** F8 owns **146–150**, continuing from F7's 145.
+
+| F8 test | Test |
+| --- | --- |
+| 146 | A barcode with a wrong EAN-13 check digit is rejected; the valid sample imports |
+| 147 | The Pastel Category column creates or reuses a category and links the product to it |
+| 148 | The brief-named routes stage, revalidate and commit; `external_key` maps to `external_code` |
+| 149 | `import_staging` exposes the staged rows under the brief names; staging is idempotent |
+| 150 | The wizard renders the tabs and drop zone with a 20-row preview; the mapping key is per kind |
+
+All five are Vitest tests in `tests/import-f8.test.ts`, so `npm test` shows them (the brief's stop
+rule: a test counts only when `npm test` reports it). They drive the real route handlers with a real
+access token against the real local Postgres, and the component test renders with `react-dom/server`
+(there is no jsdom in this repo); nothing is mocked.
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file; F8 builds neither.

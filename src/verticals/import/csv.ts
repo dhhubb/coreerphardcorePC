@@ -3,8 +3,7 @@
  *
  * Parsing runs in the browser (PapaParse) so the shop sees a preview before anything is uploaded;
  * the parsed rows are then sent to the branch in chunks. This module holds the parts that are
- * shared by the browser and the tests: the chunking, and a small RFC4180 writer for the COPY
- * payload the branch streams into the staging table.
+ * shared by the browser and the tests: the chunking, and a small RFC4180 parser.
  */
 
 /** How many rows travel in one chunk from the browser to the branch. */
@@ -18,18 +17,6 @@ export function chunkRows<T>(rows: readonly T[], size = IMPORT_CHUNK_SIZE): T[][
     chunks.push(rows.slice(i, i + size));
   }
   return chunks;
-}
-
-/** Quote one CSV field when it needs it (RFC 4180). */
-export function csvField(value: string): string {
-  if (/[",\r\n]/.test(value) || value !== value.trim()) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
-}
-
-export function csvLine(fields: readonly string[]): string {
-  return fields.map(csvField).join(',');
 }
 
 /**

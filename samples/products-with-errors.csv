@@ -1,7 +1,7 @@
 StockCode,Description,Barcode,SellingPrice,CostPrice,UnitOfMeasure,Category
-B0001,Good row,6001000000001,10.00,6.00,each,Groceries
-,Missing stock code,6001000000002,10.00,6.00,each,Groceries
-B0003,,6001000000003,10.00,6.00,each,Groceries
-B0004,Bad price,6001000000004,ten,6.00,each,Groceries
-B0005,Bad unit,6001000000005,10.00,6.00,dozen,Groceries
-B0006,Negative price,6001000000006,-4.00,6.00,each,Groceries
+B0001,Good row,6001000000018,10.00,6.00,each,Groceries
+,Missing stock code,6001000000025,10.00,6.00,each,Groceries
+B0003,,6001000000032,10.00,6.00,each,Groceries
+B0004,Bad price,6001000000049,ten,6.00,each,Groceries
+B0005,Bad unit,6001000000056,10.00,6.00,dozen,Groceries
+B0006,Negative price,6001000000063,-4.00,6.00,each,Groceries

@@ -1,5 +1,3 @@
-import { from as copyFrom } from 'pg-copy-streams';
-import { Readable } from 'node:stream';
 import type { PoolClient } from 'pg';
 import Decimal from 'decimal.js';
 import { moneyFromSql } from '@/core/money';
@@ -11,7 +9,7 @@ import {
   type ImportKind,
   type SourceRow,
 } from './mapping';
-import { csvLine, IMPORT_CHUNK_SIZE } from './csv';
+import { IMPORT_CHUNK_SIZE } from './csv';
 
 export interface ImportJob {
   jobId: string;
@@ -97,31 +95,22 @@ export async function loadImportChunk(
 ): Promise<number> {
   if (input.rows.length === 0) return 0;
 
-  const copySql =
-    `copy public.import_rows
-       (org_id, branch_id, job_id, row_no, data) from stdin with (format csv, null '\\N')`;
-
-  const stream = client.query(copyFrom(copySql));
-  const lines = input.rows.map((row, index) =>
-    csvLine([
-      input.orgId,
-      input.branchId,
-      input.jobId,
-      String(input.startRowNo + index),
-      JSON.stringify(row),
-    ]),
+  // One set-based INSERT per chunk, from a JSON array. A request path runs as `authenticated`,
+  // and Postgres refuses `COPY FROM` under row-level security (0A000), so COPY cannot be the
+  // request path's loader. A single INSERT ... SELECT from jsonb_array_elements is RLS-safe (the
+  // INSERT policy still checks the org and branch) and stays one statement per chunk, which is
+  // what keeps a 5,000-row file to ten round trips (ADR-0075).
+  await client.query(
+    `insert into public.import_rows (org_id, branch_id, job_id, row_no, data)
+     select $1, $2, $3, $4 + (ordinality - 1), value
+       from jsonb_array_elements($5::jsonb) with ordinality as t(value, ordinality)`,
+    [input.orgId, input.branchId, input.jobId, input.startRowNo, JSON.stringify(input.rows)],
   );
-
-  await new Promise<void>((resolve, reject) => {
-    stream.on('error', reject);
-    stream.on('finish', () => resolve());
-    Readable.from([`${lines.join('\n')}\n`]).pipe(stream);
-  });
 
   return input.rows.length;
 }
 
-/** Stage a whole file: chunk it, map it, COPY each chunk. Returns the number of rows staged. */
+/** Stage a whole file: chunk it, map it, load each chunk in one INSERT. Returns the number staged. */
 export async function stageImportRows(
   client: PoolClient,
   input: {

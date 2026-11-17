@@ -1,17 +1,18 @@
 'use client';
 
 import { getToken } from '@/core/session';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Papa from 'papaparse';
 import {
   IMPORT_FIELDS,
   IMPORT_KINDS,
+  mappingStorageKey,
   suggestMapping,
   validateMapping,
   type ColumnMapping,
   type ImportKind,
 } from '@/verticals/import/mapping';
-import { chunkRows } from '@/verticals/import/csv';
+import { chunkRows, IMPORT_CHUNK_SIZE } from '@/verticals/import/csv';
 
 /**
  * The migration wizard (/settings/import).
@@ -20,7 +21,13 @@ import { chunkRows } from '@/verticals/import/csv';
  * Pastel columns before anything is uploaded. The parsed rows are then sent to the branch in
  * chunks. Nothing here talks to the database; every step goes through a thin route handler, and the
  * bearer token is the cashier's (never the service role key).
+ *
+ * F8 completes the brief's UI: the three tabs, the drag-and-drop drop zone, the 20-row preview, the
+ * mapping cached in localStorage as well as in `import_mappings`, and the per-row inline edit that
+ * revalidates one row through POST /api/import/revalidate.
  */
+
+const PREVIEW_ROWS = 20;
 
 interface StagedRow {
   row_id: string;
@@ -40,7 +47,11 @@ function authHeaders(): HeadersInit {
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(payload.error ?? `${path} failed (${response.status})`);
@@ -50,6 +61,12 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 type Step = 'file' | 'map' | 'review' | 'done';
 
+const KIND_LABELS: Record<ImportKind, string> = {
+  products: 'Products',
+  customers: 'Customers',
+  opening_stock: 'Opening Stock',
+};
+
 export default function ImportWizard() {
   const [kind, setKind] = useState<ImportKind>('products');
   const [step, setStep] = useState<Step>('file');
@@ -57,13 +74,43 @@ export default function ImportWizard() {
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Array<Record<string, string>>>([]);
   const [mapping, setMapping] = useState<ColumnMapping>({});
+  const [dragging, setDragging] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [staged, setStaged] = useState<StagedRow[]>([]);
+  const [editing, setEditing] = useState<{ rowId: string; data: Record<string, string> } | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ created: number; updated: number; skipped: number; journal_id: string | null } | null>(null);
+  const [result, setResult] = useState<{
+    created: number;
+    updated: number;
+    skipped: number;
+    journal_id: string | null;
+  } | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
 
   const mappingErrors = useMemo(() => validateMapping(kind, mapping), [kind, mapping]);
+
+  // Load the shop's cached mapping for the selected tab: localStorage first (instant, works
+  // offline), then the saved table row (authoritative, survives a different browser).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const cached = window.localStorage.getItem(mappingStorageKey(kind));
+    if (cached) {
+      try {
+        setMapping(JSON.parse(cached) as ColumnMapping);
+      } catch {
+        /* ignore a corrupt cache */
+      }
+    }
+    void fetch(`/api/import/mappings?kind=${kind}`, { headers: authHeaders() })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: { mapping?: ColumnMapping } | null) => {
+        if (payload?.mapping && Object.keys(payload.mapping).length > 0) {
+          setMapping(payload.mapping);
+        }
+      })
+      .catch(() => undefined);
+  }, [kind]);
 
   const onFile = useCallback(
     (file: File) => {
@@ -76,7 +123,9 @@ export default function ImportWizard() {
           const parsedHeaders = parsed.meta.fields ?? [];
           setHeaders(parsedHeaders);
           setRows(parsed.data);
-          setMapping(suggestMapping(kind, parsedHeaders));
+          setMapping((current) =>
+            Object.keys(current).length > 0 ? current : suggestMapping(kind, parsedHeaders),
+          );
           setStep('map');
         },
         error: (parseError) => setError(`could not read the file: ${parseError.message}`),
@@ -85,7 +134,20 @@ export default function ImportWizard() {
     [kind],
   );
 
+  const onDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      setDragging(false);
+      const file = event.dataTransfer.files?.[0];
+      if (file) onFile(file);
+    },
+    [onFile],
+  );
+
   const onSaveMapping = useCallback(async () => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(mappingStorageKey(kind), JSON.stringify(mapping));
+    }
     try {
       await fetch('/api/import/mappings', {
         method: 'PUT',
@@ -94,7 +156,7 @@ export default function ImportWizard() {
       });
       setError(null);
     } catch {
-      setError('the branch did not answer');
+      setError('the branch did not answer; the mapping is still saved on this device');
     }
   }, [kind, mapping]);
 
@@ -117,7 +179,7 @@ export default function ImportWizard() {
         }
         return out;
       });
-      const chunks = chunkRows(mapped);
+      const chunks = chunkRows(mapped, IMPORT_CHUNK_SIZE);
 
       setProgress(`staging 0 / ${mapped.length}`);
       const first = await postJson<{ job_id: string }>('/api/import/jobs', {
@@ -130,7 +192,8 @@ export default function ImportWizard() {
 
       let sent = chunks[0]?.length ?? 0;
       for (let i = 1; i < chunks.length; i += 1) {
-        await postJson(`/api/import/jobs/${first.job_id}/chunks`, {
+        await postJson('/api/import/chunk', {
+          job_id: first.job_id,
           start_row_no: sent + 1,
           rows: chunks[i],
         });
@@ -139,7 +202,7 @@ export default function ImportWizard() {
       }
 
       setProgress('validating…');
-      await postJson(`/api/import/jobs/${first.job_id}/validate`, {});
+      await postJson('/api/import/revalidate', { job_id: first.job_id });
       await loadRows(first.job_id);
       setProgress(null);
       setStep('review');
@@ -149,24 +212,21 @@ export default function ImportWizard() {
     }
   }, [kind, loadRows, mapping, rows, sourceName]);
 
-  const onFixRow = useCallback(
-    async (rowId: string, data: Record<string, string>) => {
-      if (!jobId) return;
-      try {
-        await fetch(`/api/import/rows/${rowId}`, {
-          method: 'PATCH',
-          headers: authHeaders(),
-          body: JSON.stringify({ data }),
-        });
-        await postJson(`/api/import/jobs/${jobId}/validate`, {});
-        await loadRows(jobId);
-        setError(null);
-      } catch (fixError) {
-        setError((fixError as Error).message);
-      }
-    },
-    [jobId, loadRows],
-  );
+  const onSaveRow = useCallback(async () => {
+    if (!jobId || !editing) return;
+    try {
+      await postJson('/api/import/revalidate', {
+        job_id: jobId,
+        row_id: editing.rowId,
+        data: editing.data,
+      });
+      await loadRows(jobId);
+      setEditing(null);
+      setError(null);
+    } catch (fixError) {
+      setError((fixError as Error).message);
+    }
+  }, [editing, jobId, loadRows]);
 
   const onCommit = useCallback(async () => {
     if (!jobId) return;
@@ -177,7 +237,7 @@ export default function ImportWizard() {
         updated: number;
         skipped: number;
         journal_id: string | null;
-      }>(`/api/import/jobs/${jobId}/commit`, {});
+      }>('/api/import/commit', { job_id: jobId });
       setResult(committed);
       setProgress(null);
       setStep('done');
@@ -192,42 +252,88 @@ export default function ImportWizard() {
   return (
     <main style={{ padding: 24, fontFamily: 'system-ui, sans-serif', maxWidth: 960 }}>
       <h1>Import from Pastel</h1>
-      {error && <p data-testid="import-error" style={{ color: '#b00' }}>{error}</p>}
+
+      <nav data-testid="import-tabs" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        {IMPORT_KINDS.map((option) => (
+          <button
+            key={option}
+            type="button"
+            data-testid={`import-tab-${option}`}
+            aria-pressed={kind === option}
+            onClick={() => {
+              setKind(option);
+              setStep('file');
+              setHeaders([]);
+              setRows([]);
+              setStaged([]);
+              setJobId(null);
+              setError(null);
+            }}
+            style={{
+              padding: '6px 12px',
+              fontWeight: kind === option ? 700 : 400,
+              borderBottom: kind === option ? '2px solid #333' : '2px solid transparent',
+            }}
+          >
+            {KIND_LABELS[option]}
+          </button>
+        ))}
+      </nav>
+
+      {error && (
+        <p data-testid="import-error" style={{ color: '#b00' }}>
+          {error}
+        </p>
+      )}
       {progress && <p data-testid="import-progress">{progress}</p>}
 
       {step === 'file' && (
         <section data-testid="import-step-file">
-          <label>
-            What are you importing?{' '}
-            <select
-              data-testid="import-kind"
-              value={kind}
-              onChange={(event) => setKind(event.target.value as ImportKind)}
-            >
-              {IMPORT_KINDS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p>Export the file from Pastel as CSV, then choose it here. It stays on this machine until you start.</p>
-          <input
-            data-testid="import-file"
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) onFile(file);
+          <p>
+            Export the file from Pastel as CSV, then drop it here. It stays on this machine until you
+            start.
+          </p>
+          <div
+            data-testid="import-dropzone"
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
             }}
-          />
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+            style={{
+              border: `2px dashed ${dragging ? '#333' : '#bbb'}`,
+              borderRadius: 8,
+              padding: 24,
+              textAlign: 'center',
+              background: dragging ? '#f6f6f6' : 'transparent',
+            }}
+          >
+            <p>Drag and drop a CSV here, or</p>
+            <button type="button" onClick={() => fileInput.current?.click()}>
+              choose a file
+            </button>
+            <input
+              ref={fileInput}
+              data-testid="import-file"
+              type="file"
+              accept=".csv,text/csv"
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) onFile(file);
+              }}
+            />
+          </div>
         </section>
       )}
 
       {step === 'map' && (
         <section data-testid="import-step-map">
           <h2>Map the columns</h2>
-          <p>{sourceName}: {rows.length} rows, {headers.length} columns.</p>
+          <p>
+            {sourceName}: {rows.length} rows, {headers.length} columns.
+          </p>
           <table data-testid="import-mapping">
             <thead>
               <tr>
@@ -263,7 +369,9 @@ export default function ImportWizard() {
             </tbody>
           </table>
 
-          <h3>Preview</h3>
+          <h3>
+            Preview (first {Math.min(PREVIEW_ROWS, rows.length)} of {rows.length} rows)
+          </h3>
           <table data-testid="import-preview">
             <thead>
               <tr>
@@ -273,7 +381,7 @@ export default function ImportWizard() {
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, 5).map((row, index) => (
+              {rows.slice(0, PREVIEW_ROWS).map((row, index) => (
                 <tr key={index}>
                   {headers.map((header) => (
                     <td key={header}>{row[header] ?? ''}</td>
@@ -292,7 +400,11 @@ export default function ImportWizard() {
           )}
 
           <p>
-            <button type="button" onClick={() => void onSaveMapping()} data-testid="import-save-mapping">
+            <button
+              type="button"
+              onClick={() => void onSaveMapping()}
+              data-testid="import-save-mapping"
+            >
               Save this mapping
             </button>{' '}
             <button
@@ -330,29 +442,66 @@ export default function ImportWizard() {
                   <td>
                     {row.errors.length === 0
                       ? '—'
-                      : row.errors.map((problem) => `${problem.field}: ${problem.message}`).join('; ')}
+                      : row.errors
+                          .map((problem) => `${problem.field}: ${problem.message}`)
+                          .join('; ')}
                   </td>
                   <td>
-                    {row.status === 'invalid' && (
-                      <button
-                        type="button"
-                        data-testid={`import-fix-${row.row_no}`}
-                        onClick={() =>
-                          void onFixRow(row.row_id, {
-                            ...row.data,
-                            name: row.data.name || 'Imported item',
-                            qty: row.data.qty || '0',
-                          })
-                        }
-                      >
-                        Fill blanks
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      data-testid={`import-edit-${row.row_no}`}
+                      onClick={() =>
+                        setEditing({
+                          rowId: row.row_id,
+                          data: Object.fromEntries(
+                            IMPORT_FIELDS[kind].map((spec) => [
+                              spec.field,
+                              row.data[spec.field] ?? '',
+                            ]),
+                          ),
+                        })
+                      }
+                    >
+                      Edit
+                    </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+
+          {editing && (
+            <section
+              data-testid="import-edit-panel"
+              style={{ border: '1px solid #ccc', padding: 12, marginTop: 12 }}
+            >
+              <h3>Fix row</h3>
+              {IMPORT_FIELDS[kind].map((spec) => (
+                <label key={spec.field} style={{ display: 'block', marginBottom: 6 }}>
+                  {spec.label}
+                  {spec.required ? ' *' : ''}{' '}
+                  <input
+                    data-testid={`import-edit-field-${spec.field}`}
+                    value={editing.data[spec.field] ?? ''}
+                    onChange={(event) =>
+                      setEditing((current) =>
+                        current
+                          ? { ...current, data: { ...current.data, [spec.field]: event.target.value } }
+                          : current,
+                      )
+                    }
+                  />
+                </label>
+              ))}
+              <button type="button" onClick={() => void onSaveRow()} data-testid="import-edit-save">
+                Save and revalidate
+              </button>{' '}
+              <button type="button" onClick={() => setEditing(null)}>
+                Cancel
+              </button>
+            </section>
+          )}
+
           <p>
             <button
               type="button"

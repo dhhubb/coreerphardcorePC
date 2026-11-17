@@ -25,23 +25,24 @@ export interface ImportFieldSpec {
  */
 export const IMPORT_FIELDS: Record<ImportKind, readonly ImportFieldSpec[]> = {
   products: [
-    { field: 'external_code', label: 'Pastel code', required: true, hint: 'The idempotency key' },
+    { field: 'external_code', label: 'Pastel code', required: true, hint: 'The idempotency key (external_key)' },
     { field: 'name', label: 'Description', required: true },
+    { field: 'category', label: 'Category', required: false, hint: 'Created or reused by name' },
     { field: 'sku', label: 'Stock code', required: false, hint: 'Defaults to a generated SKU' },
-    { field: 'barcode', label: 'Barcode', required: false },
+    { field: 'barcode', label: 'Barcode', required: false, hint: 'Must be a valid EAN-13' },
     { field: 'unit', label: 'Unit', required: false, hint: 'each, kg, g, l, ml, pack' },
     { field: 'price', label: 'Selling price', required: false, hint: 'Lands in the retail list' },
-    { field: 'cost', label: 'Cost', required: false, hint: 'Recorded for reference' },
+    { field: 'cost', label: 'Cost', required: false, hint: 'Recorded on the product' },
   ],
   customers: [
-    { field: 'external_code', label: 'Pastel code', required: true, hint: 'The idempotency key' },
+    { field: 'external_code', label: 'Pastel code', required: true, hint: 'The idempotency key (external_key)' },
     { field: 'name', label: 'Name', required: true },
     { field: 'email', label: 'Email', required: false },
     { field: 'phone', label: 'Telephone', required: false },
     { field: 'kind', label: 'Account type', required: false, hint: 'customer, supplier, both' },
   ],
   opening_stock: [
-    { field: 'external_code', label: 'Pastel code', required: false, hint: 'Or map the SKU' },
+    { field: 'external_code', label: 'Pastel code', required: false, hint: 'Or map the SKU (external_key)' },
     { field: 'sku', label: 'Stock code', required: false, hint: 'Or map the Pastel code' },
     { field: 'warehouse_code', label: 'Warehouse', required: false, hint: 'Defaults to the branch' },
     { field: 'qty', label: 'Quantity', required: true },
@@ -49,11 +50,26 @@ export const IMPORT_FIELDS: Record<ImportKind, readonly ImportFieldSpec[]> = {
   ],
 };
 
+/**
+ * The brief names the Pastel code `external_key`; H5 shipped it as `external_code` (and so did
+ * `products.external_code`). Rather than rename a stored column, the brief's name is accepted as an
+ * alias and normalised to the canonical field, so a mapping that targets either name works.
+ */
+const FIELD_TARGET_ALIASES: Record<string, string> = {
+  external_key: 'external_code',
+};
+
+/** Resolve a mapping target to the canonical field name (or return it unchanged if unknown). */
+export function canonicalField(field: string): string {
+  return FIELD_TARGET_ALIASES[field] ?? field;
+}
+
 /** One saved mapping: source column header -> our field. */
 export type ColumnMapping = Record<string, string>;
 
 export function fieldSpec(kind: ImportKind, field: string): ImportFieldSpec | undefined {
-  return IMPORT_FIELDS[kind].find((spec) => spec.field === field);
+  const canonical = canonicalField(field);
+  return IMPORT_FIELDS[kind].find((spec) => spec.field === canonical);
 }
 
 export function requiredFields(kind: ImportKind): readonly string[] {
@@ -62,7 +78,8 @@ export function requiredFields(kind: ImportKind): readonly string[] {
 
 /**
  * Validate a mapping against the kind's fields: every target must be a known field, no two source
- * columns may target the same field, and every required field must be mapped.
+ * columns may target the same field, and every required field must be mapped. Targets are resolved
+ * through the alias table first, so `external_key` and `external_code` count as the same field.
  */
 export function validateMapping(kind: ImportKind, mapping: ColumnMapping): string[] {
   const errors: string[] = [];
@@ -70,14 +87,15 @@ export function validateMapping(kind: ImportKind, mapping: ColumnMapping): strin
 
   for (const [source, target] of Object.entries(mapping)) {
     if (!target) continue;
-    if (!fieldSpec(kind, target)) {
+    const canonical = canonicalField(target);
+    if (!fieldSpec(kind, canonical)) {
       errors.push(`column "${source}" maps to unknown field "${target}"`);
       continue;
     }
-    if (targets.has(target)) {
-      errors.push(`field "${target}" is mapped from more than one column`);
+    if (targets.has(canonical)) {
+      errors.push(`field "${canonical}" is mapped from more than one column`);
     }
-    targets.add(target);
+    targets.add(canonical);
   }
 
   for (const required of requiredFields(kind)) {
@@ -95,6 +113,8 @@ export type SourceRow = Record<string, string | undefined>;
 /**
  * Apply a mapping to a source row, producing the staged row's data. Empty strings become absent
  * keys, so validation sees a missing field rather than an empty one and the UI shows a blank.
+ * Targets are resolved through the alias table, so a row mapped to `external_key` stages under the
+ * canonical `external_code` the SQL validation reads.
  */
 export function applyMapping(mapping: ColumnMapping, row: SourceRow): Record<string, string> {
   const data: Record<string, string> = {};
@@ -104,7 +124,7 @@ export function applyMapping(mapping: ColumnMapping, row: SourceRow): Record<str
     if (value === undefined || value === null) continue;
     const trimmed = String(value).trim();
     if (trimmed === '') continue;
-    data[target] = trimmed;
+    data[canonicalField(target)] = trimmed;
   }
   return data;
 }
@@ -163,4 +183,38 @@ export function suggestMapping(kind: ImportKind, headers: readonly string[]): Co
     }
   }
   return mapping;
+}
+
+/**
+ * Is a code a valid EAN-13 (13 digits and a correct modulo-10 check digit)? Mirrors
+ * `app.ean13_valid` so the wizard can flag a bad barcode in the browser preview. Returns false for
+ * an absent code, so callers that care about "absent" test the value first.
+ */
+export function ean13Valid(code: string | undefined | null): boolean {
+  const value = (code ?? '').trim();
+  if (!/^[0-9]{13}$/.test(value)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i += 1) {
+    sum += Number(value[i]) * (i % 2 === 0 ? 1 : 3);
+  }
+  return (10 - (sum % 10)) % 10 === Number(value[12]);
+}
+
+/** A URL-ish slug from free text. Mirrors `app.slugify`, used to preview the category the row lands in. */
+export function slugify(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/** A category name is usable when it can form a non-empty slug. Mirrors the SQL rule. */
+export function categoryValid(name: string | undefined | null): boolean {
+  return slugify(name ?? '') !== '';
+}
+
+/** The localStorage key the wizard caches a shop's mapping under (per kind), so it is reused offline. */
+export function mappingStorageKey(kind: ImportKind): string {
+  return `erp.import.mapping.${kind}`;
 }

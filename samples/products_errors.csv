@@ -1,0 +1,8 @@
+StockCode,Description,Barcode,SellingPrice,CostPrice,UnitOfMeasure,Category
+E0001,Good row,6002000000015,12.00,7.00,each,Hardware
+,No Pastel code,6002000000022,12.00,7.00,each,Hardware
+E0003,,6002000000039,12.00,7.00,each,Hardware
+E0004,Bad price,notanumber,twelve,7.00,each,Hardware
+E0005,Bad unit,6002000000053,12.00,7.00,dozen,Hardware
+E0006,Bad EAN-13 check digit,6002000000069,12.00,7.00,each,Hardware
+E0007,Barcode too short,6002000000,12.00,7.00,each,Hardware

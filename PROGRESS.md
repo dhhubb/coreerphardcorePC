@@ -40,6 +40,7 @@ tests 112–118.
 | F5 | Sync engine (H2) completion | tests 131–135 | DONE |
 | F6 | Fiscal and numbering (H3) completion | tests 136–140 | DONE |
 | F7 | Hardware and receipts (H4) completion: scanner hook, camera, IndexedDB holds, relay | tests 141–145 | DONE |
+| F8 | Migration wizard (H5) completion: EAN-13, category, external_key, brief routes, import_staging, tabs UI | tests 146–150 | DONE |
 
 ## M0 — Setup
 
@@ -2152,3 +2153,91 @@ $ scripts/check-tenant-tables.sql
   in a file F7 never touches; it passed on the pristine base and on two subsequent full runs (the
   planner's choice depends on table statistics, which other test files perturb). No test was
   weakened.
+
+## F8 — Migration wizard (H5) completion
+
+F8 is a completion slice over the migration wizard H5 already shipped (ADR-0042–0044, tests 75–85).
+H5 built the staging tables, the mapping module, the chunked staging, the one-transaction commit, the
+opening-stock journal and the `/settings/import` page. F8 fills the named gaps H5 left, and it is
+additive: no core table or function changes (ADR-0065, ADR-0075). After F7's 145, F8 owns tests
+**146–150** (ADR-0010).
+
+### What F8 adds
+
+* **Migration** `supabase/migrations/20260101210000_import_f8.sql`
+  * `app.slugify(text)` and `app.ean13_valid(text)` — two pure helpers.
+  * `app.import_row_errors` re-created: a present barcode must pass the EAN-13 checksum, and a
+    present category must form a slug.
+  * `app.import_commit_job` re-created: the products branch create-or-gets each named category (by
+    slug) and links the product inside the same upsert; records `cost`.
+  * `public.import_staging` — a `security_invoker` VIEW over `import_rows` with the brief's column
+    names (`row_number`, `raw`, `status`, `error`).
+  * `products.cost numeric(19,4)` — one additive nullable column.
+  * The job-status CHECK widened with the brief's `pending` / `validating` / `failed`.
+* **Module** `src/verticals/import/mapping.ts`: the `category` and `cost` fields, the `external_key`
+  alias (`canonicalField`), and the TS mirrors `ean13Valid`, `slugify`, `categoryValid`,
+  `mappingStorageKey`.
+* **Module** `src/verticals/import/jobs.ts`: the chunk loader no longer uses `COPY FROM` (Postgres
+  refuses it under RLS, `0A000`); it is now one set-based `INSERT ... SELECT from
+  jsonb_array_elements` per chunk, so it runs on a request path as `authenticated`.
+* **Routes** (the brief's names): `POST /api/import/chunk`, `POST /api/import/revalidate`,
+  `POST /api/import/commit`. The H5 routes stay.
+* **UI** `src/app/settings/import/wizard.tsx`: three tabs (Products / Customers / Opening Stock), a
+  drag-and-drop drop zone, the 20-row preview, the mapping cached in localStorage per kind, and the
+  per-row inline edit that revalidates one row.
+* **Samples**: `samples/products_errors.csv` (a fresh error file with a deliberate EAN-13
+  checksum error); the `products-5000.csv` barcodes regenerated as unique valid EAN-13 codes.
+
+### The F8 tests (`tests/import-f8.test.ts`)
+
+| Test | What it proves |
+| --- | --- |
+| 146 | A wrong EAN-13 check digit is rejected by `app.import_row_errors`; the valid sample validates clean |
+| 147 | The Pastel Category column creates or reuses a category and links each product to it |
+| 148 | The brief-named routes stage, revalidate and commit; `external_key` maps to `external_code` |
+| 149 | `import_staging` exposes the staged rows under the brief names; a row can be fixed and revalidated |
+| 150 | The wizard renders the three tabs and the drop zone; the mapping key is per kind |
+
+### Gate evidence
+
+```
+$ npm test
+ Test Files  31 passed (31)
+      Tests  214 passed (214)
+
+$ npx next lint
+✔ No ESLint warnings or errors
+
+$ npx tsc --noEmit
+(no output — clean)
+
+$ npm run build
+ ✓ Compiled successfully
+
+$ node_modules/.bin/supabase db reset
+Applying migration 20260101210000_import_f8.sql...
+Finished supabase db reset
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+```
+
+### Notes
+
+* **Additive.** No core table or function changed (ADR-0065, ADR-0075). The only schema change is one
+  nullable column (`products.cost`), a view, and the re-created H5 validation/commit functions. The
+  tenant invariant checks still return zero rows.
+* **A latent H5 bug surfaced and was fixed.** H5 staged rows with `COPY FROM STDIN`, which Postgres
+  refuses under row-level security. The H5 tests never noticed because they run as the `postgres`
+  superuser; a request path runs as `authenticated`, so F8's brief-named routes exposed it. The
+  loader is now a set-based INSERT from a JSON array.
+* **The perf gate was protected.** The RLS-safe loader plus a separate category UPDATE pushed H5
+  test 75 (whole wizard under 2 s) to ~2.2 s. Resolving the category inline in the product upsert
+  brought it back to ~1.6 s (measured phases ~0.2 s stage / ~0.35 s validate / ~1.3 s commit). No
+  test was weakened.
+* **No test is mocked.** The F8 tests call the real SQL functions, the real route handlers with a
+  real access token, and the real local Postgres. Test 150 renders the component with
+  `react-dom/server` (there is no jsdom in this repo).

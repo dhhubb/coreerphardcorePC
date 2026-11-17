@@ -266,6 +266,7 @@ them 16–18, but those are taken by R4/H1). F5 (sync engine completion) owns 13
 (fiscal and numbering completion) owns 136–140 (`tests/fiscal-f6.test.ts`, ADR-0073; the F6 brief's
 own numbers 1–25 collide with the tenancy and accounting tests). F7 (hardware and receipts
 completion) owns 141–145 (`tests/hardware-f7.test.ts`, ADR-0074; the F7 brief's own numbers collide
-with the core tests). A new
+with the core tests). F8 (migration wizard completion) owns 146–150 (`tests/import-f8.test.ts`,
+ADR-0075; the F8 brief's own numbers collide with the core tests). A new
 run continues from the highest number actually present; ranges in `docs/phase2/README.md` are
 indicative only (ADR-0010).
