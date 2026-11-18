@@ -2346,3 +2346,69 @@ $ scripts/check-tenant-tables.sql
   test 8 (planner-statistics dependent, AGENTS.md) failed twice and `import-h5` test 75 (the 2 s
   timing gate) failed once; each passes in isolation and on re-run, and eight of the ten full runs
   were 224/224. They are not related to F9.
+
+## F10 — home shell, role-aware menus and PDF stock reports
+
+**Status: complete. All gates pass.**
+
+The slice adds a landing page that shows the sign-in form first, a `/home` page whose menus and
+shortcuts are filtered by the signed-in member's role, the `member_role` claim that makes that
+possible, and stock reports (on-hand and movements) that export to PDF without a new dependency.
+
+### What changed (additive, ADR-0065)
+
+* `supabase/migrations/20260101230000_home_reports_f10.sql` — re-creates `public.custom_access_token_hook`
+  and `app.login_context` to also emit `member_role` from `memberships.role`; adds the read-only
+  `security invoker` functions `app.report_stock_on_hand` and `app.report_stock_movements` and their
+  grants. No core table or function shape changes.
+* `member_role` plumbing: `src/core/auth.ts`, `src/core/login.ts`, `src/core/session.ts`,
+  `src/branch/session.ts`, `src/app/api/auth/login/route.ts`, `src/app/api/auth/me/route.ts`.
+* Home vertical: `src/verticals/home/{roles.ts,nav.ts,SignInForm.tsx,index.ts}`.
+* Stock reports vertical: `src/verticals/reports/{stockTypes.ts,stock.ts,pdf.ts,stockReport.ts}`.
+* Routes: `src/app/api/reports/stock/route.ts`, `src/app/api/reports/stock/export/route.ts`.
+* Pages: `src/app/page.tsx` (landing), `src/app/home/page.tsx`, `src/app/login/page.tsx` (uses the
+  shared form), `src/app/reports/stock/page.tsx`, `src/app/reports/layout.tsx`; the shell sidebar now
+  renders the role-filtered nav model.
+* Tests: `tests/home-reports-f10.test.ts` (161–172).
+* ADR: `docs/ADR.md` ADR-0077.
+
+### Gate evidence
+
+```
+$ npm test
+ Test Files  33 passed (33)
+      Tests  236 passed (236)
+
+$ npm run lint
+✔ No ESLint warnings or errors
+
+$ npx tsc --noEmit
+(no output — clean)
+
+$ npm run build
+ ✓ Compiled successfully
+
+$ node_modules/.bin/supabase db reset
+Applying migration 20260101230000_home_reports_f10.sql...
+Finished supabase db reset
+
+$ scripts/check-fk-indexes.sql
+(0 rows)
+
+$ scripts/check-tenant-tables.sql
+(0 rows)
+```
+
+### Notes
+
+* **`member_role` is a display value, never an authorisation decision.** RLS still scopes every row
+  by `org_id` and `branch_ids`; no policy reads `member_role`. A stale claim can only change what the
+  menu offers. This is why the client may trust it.
+* **One nav model.** The home page's top menu and shortcut grid and the shell sidebar both render
+  `src/verticals/home/nav.ts`, so they cannot drift.
+* **No new dependency.** The PDF writer is a small pure PDF 1.4 module; it emits printable ASCII only
+  and escapes text, so a product name cannot break the document.
+* **No test is mocked.** The F10 tests drive the real route handlers, the real SQL functions and the
+  real token signature against the real local Postgres.
+* **Open items carried.** ZWG vs ZWL, and the ZIMRA invoice-numbering question, remain open in
+  `docs/ADR.md`; F10 builds neither.

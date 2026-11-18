@@ -19,6 +19,7 @@ export interface LoginResult {
   orgName: string | null;
   branchIds: string[];
   role: string;
+  memberRole: string | null;
 }
 
 interface LoginContextRow {
@@ -28,6 +29,7 @@ interface LoginContextRow {
   org_name: string | null;
   branch_ids: string[];
   role: string;
+  member_role: string | null;
 }
 
 const TTL_SECONDS = 12 * 3600;
@@ -66,7 +68,8 @@ export async function login(email: string, password: string): Promise<LoginResul
                    from jsonb_array_elements_text(coalesce(c -> 'branch_ids', '[]'::jsonb)) as value),
                 '{}'::text[]
               ) as branch_ids,
-              (c ->> 'role')    as role
+              (c ->> 'role')    as role,
+              (c ->> 'member_role') as member_role
          from app.login_context($1) c`,
       [userId],
     );
@@ -80,6 +83,7 @@ export async function login(email: string, password: string): Promise<LoginResul
         orgId: row.org_id,
         orgName: row.org_name,
         branchIds: row.branch_ids,
+        memberRole: row.member_role,
         ...(row.email !== null ? { email: row.email } : {}),
       },
       TTL_SECONDS,
@@ -94,6 +98,7 @@ export async function login(email: string, password: string): Promise<LoginResul
       orgName: row.org_name,
       branchIds: row.branch_ids,
       role: row.role,
+      memberRole: row.member_role,
     };
   } catch (error) {
     try {

@@ -38,6 +38,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 - [The sync engine completion (F5)](#the-sync-engine-completion-f5)
 - [The fiscal and numbering completion (F6)](#the-fiscal-and-numbering-completion-f6)
 - [Hardware and receipts completion (F7)](#hardware-and-receipts-completion-f7)
+- [The home page, role-aware menus and PDF stock reports (F10)](#the-home-page-role-aware-menus-and-pdf-stock-reports-f10)
 - [Adding a vertical module](#adding-a-vertical-module)
 - [Tests, checks and the perf run](#tests-checks-and-the-perf-run)
 
@@ -1024,17 +1025,19 @@ console.
 **Sign in.** `/login` posts an email and password to `POST /api/auth/login`. The password is checked
 in Postgres against a bcrypt hash (`app.authenticate`, a `SECURITY DEFINER` function), and the route
 returns a signed access token plus the org it scopes. The login page stores the token under
-`localStorage['token']` and the org id under `localStorage['org_id']`, then redirects to `/pos`.
+`localStorage['token']` and the org id under `localStorage['org_id']`, then redirects to `/home`
+(F10; it redirected to `/pos` before F10).
 The login path runs as `anon` (ADR-0067), never the service role, and a wrong email and a wrong
 password return the same 401 body.
 
 **Validate.** `GET /api/auth/me` re-verifies the bearer token and describes the session (user,
-`org_id`, `org_name`, `branch_ids`, role). It is the endpoint the shell uses to confirm a stored
-token is still good.
+`org_id`, `org_name`, `branch_ids`, `role`, `member_role`). It is the endpoint the shell uses to
+confirm a stored token is still good.
 
-**Shell.** `src/app/shell/Shell.tsx` wraps every `/pos` and `/admin` page (via their route
-layouts). It shows the org name and the signed-in user, a sidebar of links, and a sign-out button
-that clears the session and returns to `/login`. When there is no token it redirects to
+**Shell.** `src/app/shell/Shell.tsx` wraps every `/pos`, `/admin` and `/reports` page (via their
+route layouts). It shows the org name and the signed-in user, a sidebar of role-filtered links
+(F10), and a sign-out button
+that clears the session and returns to `/`. When there is no token it redirects to
 `/login?next=…`; the token is read first from `token` and then from the legacy `pos_access_token`
 key, so an existing session keeps working (ADR-0068). Authorisation is never decided on the client:
 every API call re-verifies the token on the server.
@@ -1188,6 +1191,39 @@ and 25). F6 closes the parts of the brief H3 left out:
 F6 also fixed a latent H3 bug: `cloudBlockFetcher` parsed the cloud's claim response as snake_case
 while the claim route serializes it as camelCase, so a branch fetching its first block over HTTP
 stored `undefined` bounds. The fetcher now accepts either spelling (ADR-0073).
+
+## The home page, role-aware menus and PDF stock reports (F10)
+
+F10 adds the front door and the stock reports, additively (ADR-0065, ADR-0077).
+
+**Landing and home.** `/` is the landing page: it shows the sign-in form first (the shared
+`SignInForm`, also used by `/login`), and a successful sign-in leads to `/home`. `/home` shows a top
+menu and a shortcut grid that reach the whole application, filtered by the signed-in member's role.
+
+**The role.** The membership role (`owner` / `admin` / `member`) travels in the access token as the
+`member_role` claim. The custom access token hook and `app.login_context` read it from
+`memberships.role`; a branch manager's PIN token carries `admin`, a cashier's `member`. `role` stays
+the Postgres role (`authenticated`). **`member_role` is a display value, never an authorisation
+decision:** RLS still scopes every row by `org_id` and `branch_ids`, no policy reads `member_role`,
+and a URL typed directly still hits RLS. It only decides which menu items and shortcuts are offered.
+
+**One nav model.** `src/verticals/home/nav.ts` is a pure list of groups and items, each with the
+least role that may see it; `visibleGroups(role)` filters it. The home page and the shell sidebar
+both render it, so they cannot drift. The owner console is owner-only; a member sees only the sell
+group.
+
+**Stock reports.** `/reports/stock` reads two reports, both keyset pages on `(created_at, id)`
+(default 50, maximum 100, never an offset):
+
+- **On hand** — quantity and value per warehouse/product/variant, from the `stock_balances` cache
+  (`app.report_stock_on_hand`).
+- **Movements** — the append-only `stock_ledger` for a period (`app.report_stock_movements`).
+
+`GET /api/reports/stock` serves either as JSON; `GET /api/reports/stock/export` streams the same
+report as a PDF. The PDF writer (`src/verticals/reports/pdf.ts`) is dependency-free: a small pure
+PDF 1.4 writer that emits printable ASCII only and escapes text, so a product name cannot break the
+document. Both SQL functions are `SECURITY INVOKER`, so RLS scopes every row. Tests 161–172 cover
+this slice in `tests/home-reports-f10.test.ts`.
 
 ## Adding a vertical module
 

@@ -37,6 +37,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       org_name: result.orgName,
       branch_ids: result.branchIds,
       role: result.role,
+      member_role: result.memberRole,
       user: { id: result.userId, email: result.email },
     });
   } catch (error) {

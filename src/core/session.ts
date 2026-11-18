@@ -20,6 +20,7 @@ export interface SessionClaims {
   orgName: string | null;
   branchIds: string[];
   role: string;
+  memberRole: string | null;
   email?: string;
   exp: number | null;
 }
@@ -39,6 +40,7 @@ export function decodeClaims(token: string): SessionClaims | null {
         ? raw.branch_ids.filter((value): value is string => typeof value === 'string')
         : [],
       role: typeof raw.role === 'string' ? raw.role : 'authenticated',
+      memberRole: typeof raw.member_role === 'string' ? raw.member_role : null,
       ...(typeof raw.email === 'string' ? { email: raw.email } : {}),
       exp: typeof raw.exp === 'number' ? raw.exp : null,
     };

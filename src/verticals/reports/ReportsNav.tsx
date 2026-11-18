@@ -11,6 +11,7 @@ const LINKS: Array<{ href: string; label: string }> = [
   { href: '/reports/today', label: "Today" },
   { href: '/reports/profit', label: 'Profit' },
   { href: '/reports/vat', label: 'VAT (ZIMRA)' },
+  { href: '/reports/stock', label: 'Stock' },
   { href: '/reports/z', label: 'Z-reports' },
 ];
 

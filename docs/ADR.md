@@ -2064,3 +2064,74 @@ route handlers with a real access token against the real local Postgres; nothing
 
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file; F9 builds neither.
+
+## ADR-0077 — F10 adds the landing page, a role-aware home page and PDF stock reports, additively
+
+**Context.** The brief asks for a landing page that shows the sign-in form first and then leads to a
+home page, for menus and shortcuts on that home page that reach the whole application *depending on
+the role of the user signed in*, and for stock reports that export to PDF. The repository already has
+a `/login` page, an app shell with a fixed sidebar, and a reports console. Nothing carried the
+membership role (`owner`/`admin`/`member`) into the access token, so no page could be role-aware, and
+no PDF library was installed.
+
+**Decision.**
+
+1. **The role travels in the token as `member_role`.** The Postgres role stays in `role`
+   (`authenticated`), as Supabase expects. The custom access token hook and `app.login_context` are
+   re-created (the additive way to change a function, per AGENTS.md) to also emit `member_role` from
+   `memberships.role`; `mintAccessToken` and `mintBranchToken` carry it; `SessionClaims.memberRole`
+   reads it. A branch manager's PIN token carries `admin`, a cashier's `member`.
+
+2. **`member_role` is a display value, never an authorisation decision.** RLS still scopes every row
+   by `org_id` and `branch_ids`, and no policy reads `member_role`. The role only decides which menu
+   items and shortcuts are *offered*; a URL typed directly still hits RLS. This is why the claim is
+   safe to trust in a client component.
+
+3. **One navigation model drives both the home page and the shell sidebar.** `src/verticals/home/nav.ts`
+   is a pure, unit-testable list of groups and items, each with the least role that may see it.
+   `visibleGroups(role)` / `visibleItems(role)` filter it. The home page renders a top menu and a
+   shortcut grid from it; the shell sidebar renders the same list, so the two cannot drift.
+
+4. **The landing page is `/`; the home page is `/home`.** `/` shows the sign-in form first (a shared
+   `SignInForm` used by both `/` and `/login`) and, on success, goes to `/home`. `/home` shows the
+   role-filtered menus and shortcuts. The shell sign-out returns to `/`.
+
+5. **PDF export without a new dependency.** `src/verticals/reports/pdf.ts` is a small, pure PDF 1.4
+   writer (Helvetica, a table, an accurate xref, multi-page). It emits only printable ASCII and
+   escapes text, so a product name cannot break the document. The stock-on-hand and stock-movements
+   tables are built by `src/verticals/reports/stockReport.ts`, also pure. `GET /api/reports/stock/export`
+   pages through the keyset internally and streams the file.
+
+6. **The stock reports read through new read-only SQL functions.** `app.report_stock_on_hand` (the
+   `stock_balances` cache) and `app.report_stock_movements` (the append-only `stock_ledger` for a
+   period), both `SECURITY INVOKER`, keyset on `(created_at, id)`, default 50, maximum 100. No core
+   table, no materialised view, no new column.
+
+**Consequence.** The migration is additive: it re-creates two functions and adds two functions and
+their grants; it edits no applied migration and no core table shape. The 40-test suite of the original
+brief is untouched; F10 adds its own tests. A stale `member_role` can only change what the menu
+offers, never what RLS returns, so the slice adds no new authorisation surface.
+
+**Test numbering.** F10 owns **161–172**, continuing from F9's 160 (ADR-0010).
+
+| F10 test | Test |
+| --- | --- |
+| 161 | The landing shows the sign-in form first; the role model coerces unknown roles to member |
+| 162 | The home menu and shortcuts are filtered by role; the owner console is owner-only |
+| 163 | A signed-in token carries `member_role`, and `/api/auth/me` returns it |
+| 164 | The access token hook adds `member_role`, and null when there is no membership |
+| 165 | A branch PIN token carries `admin` for a manager and `member` for a cashier |
+| 166 | The on-hand report returns the balance a receipt created, and RLS hides another org |
+| 167 | The movements report returns the period in and excludes out-of-range dates |
+| 168 | `GET /api/reports/stock` is a keyset page and rejects a limit above 100 |
+| 169 | `GET /api/reports/stock/export` returns a PDF naming the org and the branch |
+| 170 | The PDF writer escapes text, fits a column, and paginates a long table |
+| 171 | The stock report tables total the rows and split movements into in and out |
+| 172 | The stock reports read only the caller's branch, so another branch shows nothing |
+
+All twelve are Vitest tests in `tests/home-reports-f10.test.ts`, so `npm test` shows them. They drive
+the real route handlers, the real SQL functions and the real token signature against the real local
+Postgres; nothing is mocked.
+
+**Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
+numbering format or fiscal device integration, remain open in this file; F10 builds neither.

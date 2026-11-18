@@ -11,7 +11,10 @@ export interface AuthClaims {
   orgName?: string | null;
   /** Branches the token is scoped to. */
   branchIds: string[];
+  /** The Postgres role the connection assumes (`authenticated`). Not a membership role. */
   role: string;
+  /** The membership role (`owner`/`admin`/`member`), or null when the user has no membership. */
+  memberRole?: string | null;
   email?: string;
 }
 
@@ -22,6 +25,7 @@ interface RawJwtPayload {
   org_id?: unknown;
   org_name?: unknown;
   branch_ids?: unknown;
+  member_role?: unknown;
   exp?: unknown;
 }
 
@@ -75,6 +79,7 @@ export function verifyAccessToken(token: string): AuthClaims {
       : {}),
     branchIds,
     role: typeof decoded.role === 'string' ? decoded.role : 'authenticated',
+    memberRole: typeof decoded.member_role === 'string' ? decoded.member_role : null,
     ...(typeof decoded.email === 'string' ? { email: decoded.email } : {}),
   };
 }
@@ -95,6 +100,7 @@ export function claimsToRequestSetting(claims: AuthClaims): string {
     ...(claims.orgName !== undefined && claims.orgName !== null ? { org_name: claims.orgName } : {}),
     org_id: claims.orgId,
     branch_ids: claims.branchIds,
+    ...(claims.memberRole !== undefined ? { member_role: claims.memberRole } : {}),
   });
 }
 
@@ -154,6 +160,7 @@ export function mintAccessToken(
     orgName?: string | null;
     email?: string;
     role?: string;
+    memberRole?: string | null;
   },
   ttlSeconds = 12 * 3600,
 ): string {
@@ -166,6 +173,7 @@ export function mintAccessToken(
       ...(claims.orgName !== undefined && claims.orgName !== null ? { org_name: claims.orgName } : {}),
       org_id: claims.orgId,
       branch_ids: claims.branchIds,
+      member_role: claims.memberRole ?? null,
       exp: Math.floor(Date.now() / 1000) + ttlSeconds,
     }),
   );

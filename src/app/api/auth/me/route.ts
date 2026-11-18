@@ -25,6 +25,7 @@ export async function GET(request: Request) {
       org_name: orgName,
       branch_ids: claims.branchIds,
       role: claims.role,
+      member_role: claims.memberRole ?? null,
     };
   });
 }

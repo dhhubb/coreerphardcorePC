@@ -52,6 +52,9 @@ export function mintBranchToken(input: {
       role: input.isManager ? 'manager' : 'authenticated',
       org_id: input.orgId,
       branch_ids: [input.branchId],
+      // A manager PIN maps to the admin membership role for the nav; a cashier maps to member.
+      // This is a display value only — RLS scopes by org_id and branch_ids, never by member_role.
+      member_role: input.isManager ? 'admin' : 'member',
       exp,
     }),
   );
