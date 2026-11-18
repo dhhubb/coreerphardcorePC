@@ -2412,3 +2412,7 @@ $ scripts/check-tenant-tables.sql
   real token signature against the real local Postgres.
 * **Open items carried.** ZWG vs ZWL, and the ZIMRA invoice-numbering question, remain open in
   `docs/ADR.md`; F10 builds neither.
+* **One documented transient flake was observed and cleared.** One full-suite run showed 235/236 (one
+  pre-existing test failed — the known planner-statistics / timing-gate flakes noted at F9); the three
+  runs after it were 236/236. The flake is in a pre-existing test file, not F10, and F10's own twelve
+  tests passed in every run.
