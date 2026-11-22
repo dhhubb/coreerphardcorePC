@@ -2135,3 +2135,50 @@ Postgres; nothing is mocked.
 
 **Open items carried, not resolved.** ZWG vs ZWL, and whether ZIMRA requires a specific invoice
 numbering format or fiscal device integration, remain open in this file; F10 builds neither.
+
+## ADR-0078 — Deployment documentation, and a bootstrap script for self-managed Postgres
+
+**Context.** The repository documented the system thoroughly — the data model, the RLS rules, the
+indexing strategy, the test ranges — but not how to get from a clone to a running, selling
+deployment. A reader could learn what the system *is* and not how to operate it. Two concrete gaps
+surfaced while writing the guide, both reproduced:
+
+1. **The migrations do not apply to a plain Postgres.** They call `auth.jwt()`, insert into
+   `auth.users`, and grant to `anon` / `authenticated` / `service_role`. A stock `postgres:17` has
+   none of those, so `supabase db push` fails at the first migration with
+   `function auth.jwt() does not exist`. Every deployment target that is not a Supabase project —
+   including the branch box, which the README recommends running as plain Postgres — hits this.
+2. **`BRANCH_MODE` is read at build time.** `/api/branch/config` is prerendered, so a build made in
+   cloud mode keeps answering `{"mode":"cloud"}` even when the server starts with
+   `BRANCH_MODE=branch`. The existing docs mentioned the variable without saying when it is read,
+   which is the difference between a working till and a till stuck on the password form.
+
+**Decision.**
+
+1. **`scripts/bootstrap-postgres.sql` is added** and is the documented first step for any
+   self-managed Postgres. It creates the `auth` schema, `auth.jwt()` (reading
+   `request.jwt.claims`), a minimal `auth.users` table, the three Supabase roles, and the schema
+   `USAGE` grants on `auth` and `extensions`. It is idempotent and additive: on a real Supabase
+   database it is a no-op, because every object already exists. It creates no tenant data and grants
+   nothing beyond what the migrations already grant.
+
+2. **`docs/DEPLOYMENT.md` is the lifecycle guide**, from cloning in VS Code through developing
+   further, deploying on either path, going live, and operating the result. It is linked from the
+   README. `README.md` gains a short Deployment section that names the two traps above.
+
+3. **The go-live sequence is verified, not asserted.** The organisation → branch → warehouse →
+   product → receipt → invoice path in §9 was executed against a freshly reset database and the
+   resulting ledger checked (`dr = cr = 201.5000`). The guide quotes the observed output.
+
+4. **The bootstrap is documented, not hidden in a Dockerfile.** The repo still ships no Dockerfile:
+   the deployment target varies (container, systemd, platform), and a sketch in the guide is more
+   honest than a file that only fits one of them.
+
+**Consequence.** Deploying to non-Supabase Postgres is now a documented, tested path rather than an
+undocumented assumption. The bootstrap script is a deployment artefact, not a schema change: it is
+not a migration, it does not run automatically, and the migrations remain the single source of truth
+for the schema. A future run that adds a Supabase-managed object must remember to add its stand-in
+here, or the self-managed path breaks again.
+
+**Not decided here.** The guide does not choose a hosting platform, a TLS terminator, or a secrets
+manager, because those are deployment-environment choices, not product decisions.

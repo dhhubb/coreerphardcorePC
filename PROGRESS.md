@@ -42,6 +42,7 @@ tests 112–118.
 | F7 | Hardware and receipts (H4) completion: scanner hook, camera, IndexedDB holds, relay | tests 141–145 | DONE |
 | F8 | Migration wizard (H5) completion: EAN-13, category, external_key, brief routes, import_staging, tabs UI | tests 146–150 | DONE |
 | F9 | Reports and owner console (H6) completion: live today dashboard, Z-report detail, profit/VAT/Z pages, cloud owner console, offline shell | tests 151–160 | DONE |
+| D1 | Deployment documentation: clone → VS Code → develop → deploy → go live; self-managed Postgres bootstrap | docs only; full gate re-run | DONE |
 
 ## M0 — Setup
 
@@ -2416,3 +2417,48 @@ $ scripts/check-tenant-tables.sql
   pre-existing test failed — the known planner-statistics / timing-gate flakes noted at F9); the three
   runs after it were 236/236. The flake is in a pre-existing test file, not F10, and F10's own twelve
   tests passed in every run.
+
+## D1 — Deployment documentation (clone → VS Code → develop → deploy → go live)
+
+**Scope.** Documentation only, plus one deployment script. No schema change, no migration, no test
+added or altered.
+
+* `docs/DEPLOYMENT.md` — new. The lifecycle guide: local setup, the four env files, developing it
+  further, the cloud path, the branch path, the app deployment (container/systemd/reverse proxy),
+  going live (first org → first stock → first sale → verification), verifying a deployment,
+  operating it, upgrading, troubleshooting.
+* `scripts/bootstrap-postgres.sql` — new. Makes the migrations apply to a plain Postgres, which the
+  branch path needs and which was previously undocumented and broken (`function auth.jwt() does not
+  exist` on the first migration).
+* `README.md` — new "Deployment" section linking the guide and naming the two traps.
+* `docs/ADR.md` — ADR-0078 records the bootstrap decision and the build-time `BRANCH_MODE` finding.
+
+**Gate.** Re-run in full after a `supabase db reset` on a fresh database.
+
+```
+Test Files  33 passed (33)
+      Tests  236 passed (236)
+```
+
+`npm run build` → exit 0. `npm run lint` → `✔ No ESLint warnings or errors`.
+`scripts/check-fk-indexes.sql` → `(0 rows)`. `scripts/check-tenant-tables.sql` → `(0 rows)`.
+`supabase db reset` → `Finished supabase db reset`, 34 migrations applied.
+
+**Verified while writing it, not assumed.**
+
+* Bootstrap + 34 migrations apply to a stock `postgres:17` image, and the app then serves a login,
+  a product list and a POS sale against it.
+* `db push` without `--include-all` applies all 34 to a database that has never seen this repo.
+  (An earlier draft of the guide claimed the opposite; it was wrong and was corrected.)
+* The go-live sequence in §9 was executed end to end: `create_org` → branch → warehouse → product
+  → `post_receipt` → `create_invoice` gave `invoice_no 000001`, `total 57.5000`, and
+  `dr = cr = 201.5000` across both journals, with the FIFO consumption recorded at the original
+  12.0000 layer cost.
+* With Redis stopped, exactly three test files fail (`admin-a2`, `frontend-f2`, `retail-r2`):
+  `Test Files 3 failed (3)` / `Tests 7 failed | 3 passed (10)`. A branch build with no Redis still
+  sells: the same POS sale returned HTTP 200 with `BRANCH_MODE=branch` and no Redis running.
+
+**Known transient flake, unchanged.** One full-suite run showed 235/236 with
+`tests/retail-r2.test.ts > 8. get_price uses the price_list_items variant index` failing — the
+planner-statistics flake already recorded at F9/F10. Re-running that file alone: `4 passed (4)`.
+The immediately preceding full run on the same code was 236/236. The test was not modified.

@@ -16,6 +16,7 @@ migrations, and Prisma usually connects as a role that bypasses RLS.
 ## Contents
 
 - [Getting started](#getting-started)
+- [Deployment](#deployment)
 - [Data model](#data-model)
 - [Tenancy and RLS](#tenancy-and-rls)
 - [Indexing strategy](#indexing-strategy)
@@ -62,6 +63,24 @@ Business logic lives in SQL functions under the `app` schema. TypeScript route h
 `src/app/api/**` stay thin: they parse the request, call one function inside a user-scoped
 transaction, and serialise the result. The domain modules in `src/core` and `src/accounting` are
 typed wrappers over those functions.
+
+## Deployment
+
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) is the step-by-step guide from a clone in VS Code to a
+running deployment: local setup, the environment files, the cloud path (hosted Supabase or your own
+Postgres 17), the branch path (one shop, no internet, no Redis), the build/start commands, how to
+verify a deployment, and how to operate it.
+
+Two things it covers that are easy to get wrong:
+
+- **A self-managed Postgres needs a bootstrap first.** A plain Postgres has no `auth` schema, no
+  `auth.jwt()` helper, and none of the `anon` / `authenticated` / `service_role` roles the migrations
+  grant to. `psql "$DATABASE_URL" -f scripts/bootstrap-postgres.sql` creates them; then
+  `npx supabase db push --remote "$DATABASE_URL" --yes` applies all 34 migrations. Verified against a
+  stock `postgres:17`.
+- **`BRANCH_MODE` is read at build time.** `/api/branch/config` is prerendered, so a build made in
+  cloud mode still reports `cloud` when the server is started with `BRANCH_MODE=branch`. Set
+  `BRANCH_MODE`, `BRANCH_ORG_ID` and `BRANCH_ID` in the environment that runs `npm run build`.
 
 ## Data model
 
